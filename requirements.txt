@@ -1,0 +1,15 @@
+# Core data and market data libraries
+yfinance>=0.2.31
+pandas>=2.0.0
+numpy>=1.24.0
+pyharmonics
+
+# Scientific computing
+scipy>=1.10.0
+
+# Plotting and visualization
+matplotlib>=3.7.0
+mplfinance>=0.12.9
+
+# Optional: Uncomment if you want technical indicators (requires system dependencies)
+# ta-lib>=0.4.28
