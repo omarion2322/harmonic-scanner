@@ -46,113 +46,97 @@ def get_sp500_tickers() -> List[str]:
         ]
 
 
-def get_nasdaq_tickers_with_volume(min_volume_usd: float = 1_000_000) -> List[str]:
+def get_nasdaq_tickers_with_volume(min_volume_usd: float = 1_000_000, timeframe: str = '1d') -> List[str]:
     """
-    Get Nasdaq tickers filtered by average daily volume (server-side filtering).
-    Much faster than downloading data for each ticker individually.
+    Get Nasdaq tickers filtered by average daily volume (quick filter using current price).
+    Much faster than downloading historical data for each ticker.
 
     Args:
         min_volume_usd: Minimum average daily dollar volume
+        timeframe: Timeframe for scanning ('1d', '1wk', '1mo')
 
     Returns:
         List of Nasdaq ticker symbols meeting volume criteria
     """
+    # Adjust volume threshold based on timeframe
+    if timeframe == '1wk':
+        adjusted_min_volume_usd = min_volume_usd * 5
+    elif timeframe == '1mo':
+        adjusted_min_volume_usd = min_volume_usd * 21
+    else:
+        adjusted_min_volume_usd = min_volume_usd
+
+    print(f"Fetching Nasdaq tickers with volume > ${min_volume_usd:,.0f} USD...")
+
+    # Try FinViz screener first
     try:
-        print(f"Fetching Nasdaq tickers with volume > ${min_volume_usd:,.0f} USD...")
+        print("  Trying FinViz screener...")
+        url = 'https://finviz.com/screener.ashx?v=111&f=exch_nasd,sh_avgvol_o1000&ft=4'
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
 
-        # Method 1: Use FinViz screener (web scraping with volume filter)
-        try:
-            print("  Trying FinViz screener...")
+        tables = pd.read_html(url, storage_options=headers)
 
-            # FinViz URL with filters:
-            # - Exchange: NASDAQ
-            # - Average Volume: > 1M shares (we'll filter by dollar volume after)
-            url = 'https://finviz.com/screener.ashx?v=111&f=exch_nasd,sh_avgvol_o1000&ft=4'
+        if len(tables) >= 2:
+            df = tables[1] if len(tables) > 1 else tables[0]
+            if 'Ticker' in df.columns:
+                tickers = [str(t).strip() for t in df['Ticker'].tolist() if pd.notna(t)]
+                print(f"✓ Fetched {len(tickers)} Nasdaq tickers from FinViz screener")
+                return tickers
+    except Exception as e:
+        print(f"⚠ FinViz method failed: {e}")
 
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
+    # Try NASDAQ API with dollar volume filter
+    try:
+        print("  Trying NASDAQ API...")
+        api_url = 'https://api.nasdaq.com/api/screener/stocks'
+        params = {
+            'tableonly': 'true',
+            'limit': '25000',
+            'exchange': 'nasdaq',
+            'download': 'true'
+        }
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'application/json'
+        }
 
-            tables = pd.read_html(url, storage_options=headers)
+        response = requests.get(api_url, params=params, headers=headers, timeout=30)
+        data = response.json()
 
-            # FinViz results are in a table
-            if len(tables) >= 2:
-                # The main data table is usually the second one
-                df = tables[1] if len(tables) > 1 else tables[0]
+        if 'data' in data and 'rows' in data['data']:
+            rows = data['data']['rows']
+            filtered_tickers = []
 
-                # Extract ticker symbols (usually in 'Ticker' column)
-                if 'Ticker' in df.columns:
-                    tickers = df['Ticker'].tolist()
-                    # Clean tickers
-                    tickers = [str(t).strip() for t in tickers if pd.notna(t)]
+            for row in rows:
+                if 'symbol' not in row:
+                    continue
 
-                    print(f"✓ Fetched {len(tickers)} Nasdaq tickers from FinViz screener")
-                    return tickers
+                try:
+                    # Quick filter: current price × average volume
+                    volume = float(row.get('volume', '0').replace(',', '')) if row.get('volume') else 0
+                    price = float(row.get('lastsale', '0').replace('$', '').replace(',', '')) if row.get('lastsale') else 0
+                    dollar_volume = volume * price
 
-        except Exception as e:
-            print(f"⚠ FinViz method failed: {e}")
-
-        # Method 2: Use NASDAQ API with volume data
-        try:
-            print("  Trying NASDAQ API...")
-
-            api_url = 'https://api.nasdaq.com/api/screener/stocks'
-            params = {
-                'tableonly': 'true',
-                'limit': '25000',
-                'exchange': 'nasdaq',
-                'download': 'true'
-            }
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'Accept': 'application/json'
-            }
-
-            response = requests.get(api_url, params=params, headers=headers, timeout=30)
-            data = response.json()
-
-            if 'data' in data and 'rows' in data['data']:
-                rows = data['data']['rows']
-
-                # Filter by dollar volume if available
-                filtered_tickers = []
-                for row in rows:
-                    if 'symbol' not in row:
-                        continue
-
-                    # Try to calculate or extract dollar volume
-                    try:
-                        # Some APIs provide 'dollarvolume' or we calculate from 'volume' and 'lastsale'
-                        volume = float(row.get('volume', 0).replace(',', '')) if 'volume' in row else 0
-                        price = float(row.get('lastsale', '0').replace('$', '').replace(',', '')) if 'lastsale' in row else 0
-
-                        dollar_volume = volume * price
-
-                        if dollar_volume >= min_volume_usd:
-                            filtered_tickers.append(row['symbol'])
-                    except:
-                        # If we can't calculate, include it (we'll filter later if needed)
+                    if dollar_volume >= adjusted_min_volume_usd:
                         filtered_tickers.append(row['symbol'])
+                except (ValueError, AttributeError):
+                    filtered_tickers.append(row['symbol'])
 
-                if filtered_tickers:
-                    print(f"✓ Fetched {len(filtered_tickers)} Nasdaq tickers from API (with volume filter)")
-                    return filtered_tickers
-                else:
-                    # If filtering failed, return all Nasdaq tickers
-                    all_tickers = [row['symbol'] for row in rows if 'symbol' in row]
-                    print(f"⚠ Could not filter by volume, returning all {len(all_tickers)} Nasdaq tickers")
-                    return all_tickers
+            if filtered_tickers:
+                print(f"✓ Fetched {len(filtered_tickers)} Nasdaq tickers from API (with volume filter)")
+                return filtered_tickers
 
-        except Exception as e:
-            print(f"⚠ NASDAQ API method failed: {e}")
-
-        # Fallback: Return curated major Nasdaq list
-        print("  All methods failed, using curated list of major Nasdaq stocks...")
-        return get_major_nasdaq_tickers()
+            # No tickers passed filter, return all
+            all_tickers = [row['symbol'] for row in rows if 'symbol' in row]
+            print(f"⚠ Could not filter by volume, returning all {len(all_tickers)} Nasdaq tickers")
+            return all_tickers
 
     except Exception as e:
-        print(f"⚠ Error in get_nasdaq_tickers_with_volume: {e}")
-        return get_major_nasdaq_tickers()
+        print(f"⚠ NASDAQ API method failed: {e}")
+
+    # Fallback to curated list
+    print("  All methods failed, using curated list of major Nasdaq stocks...")
+    return get_major_nasdaq_tickers()
 
 
 def get_major_nasdaq_tickers() -> List[str]:
@@ -244,7 +228,8 @@ def get_stock_universe(stocks_to_scan: str = 'SP500',
                        etfs_to_scan: bool = False,
                        max_stocks: int = None,
                        min_volume_usd: float = 1_000_000,
-                       download_delay: float = 0.1) -> List[str]:
+                       download_delay: float = 0.1,
+                       timeframe: str = '1d') -> List[str]:
     """
     Get list of stocks and ETFs to scan based on configuration.
 
@@ -254,11 +239,12 @@ def get_stock_universe(stocks_to_scan: str = 'SP500',
         max_stocks: Maximum number of stocks to return (None = all)
         min_volume_usd: Minimum average daily volume in USD (for 'All' mode)
         download_delay: Delay between API calls for volume filtering
+        timeframe: Timeframe for scanning ('1d', '1wk', '1mo')
 
     Returns:
         List of ticker symbols to scan
     """
-    from etf_universe import get_all_etfs
+    from .etf_universe import get_all_etfs
 
     print("="*80)
     print("FETCHING STOCK UNIVERSE")
@@ -273,7 +259,7 @@ def get_stock_universe(stocks_to_scan: str = 'SP500',
         if stocks_to_scan.upper() == 'ALL':
             print(f"Selected: ALL - All Nasdaq stocks (filtered by volume > ${min_volume_usd:,} USD)")
             print()
-            nasdaq_tickers = get_nasdaq_tickers_with_volume(min_volume_usd=min_volume_usd)
+            nasdaq_tickers = get_nasdaq_tickers_with_volume(min_volume_usd=min_volume_usd, timeframe=timeframe)
             all_tickers.extend(nasdaq_tickers)
             scan_types.append('Nasdaq (All)')
 
@@ -318,19 +304,3 @@ def get_stock_universe(stocks_to_scan: str = 'SP500',
 
     return tickers
 
-
-if __name__ == "__main__":
-    # Test the module
-    print("\nTesting S&P 500 fetch:")
-    sp500 = get_sp500_tickers()
-    print(f"Sample tickers: {sp500[:10]}")
-
-    print("\n" + "="*80)
-    print("\nTesting Nasdaq fetch:")
-    nasdaq = get_nasdaq_tickers()
-    print(f"Sample tickers: {nasdaq[:10]}")
-
-    print("\n" + "="*80)
-    print("\nTesting volume filter (first 10 tickers only):")
-    filtered = filter_by_volume(nasdaq[:10], min_volume_usd=1_000_000, lookback_days=7, delay=0.2)
-    print(f"Filtered tickers: {filtered}")

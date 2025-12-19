@@ -13,7 +13,7 @@ Edit these settings to customize the scanner behavior without modifying the main
 DATA_INTERVAL = '1wk'  # <<< CHANGE THIS TO SELECT YOUR TIMEFRAME
 
 # Import timeframe-specific optimized configurations
-from config_timeframes import get_timeframe_config
+from .config_timeframes import get_timeframe_config
 
 # Load optimized settings for selected timeframe
 _TIMEFRAME_CONFIG = get_timeframe_config(DATA_INTERVAL)
@@ -24,15 +24,6 @@ _TIMEFRAME_CONFIG = get_timeframe_config(DATA_INTERVAL)
 
 # These values are automatically set based on DATA_INTERVAL above
 # You can override them manually if needed, but the defaults are optimized
-
-# Pattern Detection Engine Selection
-# When True: Uses pyharmonics' HarmonicSearch to find and validate patterns
-#   - Matrix-based detection with built-in Fibonacci validation
-#   - Current algorithm adds: Carney trading specs, stop loss, targets, charting
-# When False: Uses custom algorithm for complete pattern detection and validation
-#   - Forward-search XABC → find D in PRZ
-#   - Carney-specific validation rules and trading specs
-USE_PYHARMONICS_HARMONIC_SEARCH = True
 
 # Fibonacci tolerance for pyharmonics (only when USE_PYHARMONICS_HARMONIC_SEARCH = True)
 # Controls pattern matching precision: 0.03 = 3% tolerance, 0.05 = 5% (more lenient)
@@ -46,47 +37,36 @@ SWING_WINDOW = _TIMEFRAME_CONFIG['SWING_WINDOW']
 # Relevant only if using custom detection algorithm (USE_PYHARMONICS_HARMONIC_SEARCH = False)
 MAX_DAYS_SINCE_PATTERN = _TIMEFRAME_CONFIG['MAX_DAYS_SINCE_PATTERN']
 
-# Maximum swing points to search ahead for pattern D completion
-# This controls how far ahead the detector looks for the D point after finding XABC
-# Higher values allow detection of longer-duration patterns
-# Relevant only if using custom detection algorithm (USE_PYHARMONICS_HARMONIC_SEARCH = False)
-# Timeframe-specific: Daily=10, 3-Day=20, Weekly=100, Monthly=150
-MAX_SEARCH_SWING_POINTS = _TIMEFRAME_CONFIG.get('MAX_SEARCH_SWING_POINTS', 10)
-
-# Maximum gap (intervening swings) allowed between XABC points
-# Controls how stretched out the XABC structure can be
-# 0 = XABC must be consecutive (tight patterns)
-# 3 = Allow up to 3 swings between each XABC point (longer patterns)
-# This respects Carney's framework: still requires alternating peaks/troughs and precise Fibonacci ratios
-# Relevant only if using custom detection algorithm (USE_PYHARMONICS_HARMONIC_SEARCH = False)
-# Timeframe-specific: Daily=0, 3-Day=1, Weekly=3, Monthly=5
-MAX_XABC_SWING_GAP = _TIMEFRAME_CONFIG.get('MAX_XABC_SWING_GAP', 0)
 
 # ============================================================================
-# ADVANCED SWING DETECTION SETTINGS FOR CUSTOM HARMONIC SEARCH
+# PATTERN DURATION FILTERS
 # ============================================================================
 
-# Enable Micro-Swing Mode (2-bar minimum swing detection)
-# When enabled, allows price swings formed by as little as 2 bars for
-# Standard and Relaxed tolerance modes (Textbook always uses standard detection)
-# Expected pattern increase: +35-60% with micro-swing mode
-ENABLE_MICRO_SWING_MODE = False
+# Reject patterns with unrealistic timeframes (e.g., 24-year patterns spanning multiple market cycles)
+# Filters out invalid patterns like SHEN (1999-2023) or RANI (multi-year CD legs)
 
-# Enable Multi-Swing BC Leg Detection
-# When enabled, allows BC leg to contain 2-8 internal micro-swings while still
-# measuring BC as a single macro retracement from B to C
-# Internal swings must be ≥0.236 of BC leg magnitude
-# Validates that C remains terminal extreme and doesn't violate X
-ENABLE_MULTI_SWING_BC = False
+# Maximum ratio of CD duration to XA duration (CD can't be more than Nx longer than XA)
+MAX_CD_TO_XA_TIME_RATIO = 5.0
 
-# Minimum internal swing magnitude (as fraction of BC leg)
-# Internal swings below this magnitude will be filtered out
-# Default: 0.236 (23.6% Fibonacci ratio)
-MULTI_SWING_BC_MIN_MAGNITUDE = 0.236
+# Maximum ratio of CD duration to AB duration
+MAX_CD_TO_AB_TIME_RATIO = 10.0
 
-# Multi-swing BC limits (2-8 internal swings)
-MULTI_SWING_BC_MIN_COUNT = 2
-MULTI_SWING_BC_MAX_COUNT = 8
+# Maximum ratio of CD duration to BC duration
+MAX_CD_TO_BC_TIME_RATIO = 8.0
+
+# Maximum ratio of CD duration to combined XABC duration
+MAX_CD_TO_XABC_TIME_RATIO = 4.0  # Relaxed from 3.0 to allow valid extended CD legs
+
+# Maximum total pattern duration (X to D) in days
+# Weekly: 7 years max (relaxed from 5), Daily: 2 years max, Monthly: 10 years max
+MAX_TOTAL_PATTERN_DURATION_DAYS = 2555  # 7 years for weekly timeframe
+
+# Maximum individual leg duration in days (prevents 19-year XA legs!)
+# No single leg should span more than this
+MAX_INDIVIDUAL_LEG_DURATION_DAYS = 1460  # 4 years max (relaxed from 3 years)
+
+# Enable/disable pattern duration filters (set to False to allow patterns of any length)
+ENABLE_TEMPORAL_VALIDATION = True
 
 # ============================================================================
 # DATA SETTINGS (Auto-loaded from timeframe config)
@@ -184,32 +164,42 @@ CHART_SAVE_DIR = './charts'
 # RISK MANAGEMENT SETTINGS (Auto-loaded from timeframe config)
 # ============================================================================
 
-# Minimum risk percentage (minimum acceptable stop loss distance)
-# Stop losses tighter than this will be rejected as too risky (prone to noise)
-# Auto-adjusted based on timeframe:
-#   Daily: 3% min (avoid noise in active trading)
-#   3-day: 2.5% min (slightly tighter)
-#   Weekly: 5% min (avoid weekly volatility noise)
-#   Monthly: 8% min (avoid monthly volatility noise)
 MIN_ALLOWED_STOP_LOSS_PCT = _TIMEFRAME_CONFIG['MIN_ALLOWED_STOP_LOSS_PCT']
 
-# Maximum risk percentage filter (distance from entry to stop loss)
-# Patterns with risk > this percentage will be filtered out as HOLD
-# This preserves market structure but filters excessively risky trades
-# Auto-adjusted based on timeframe:
-#   Daily: 10% max (tight stops for active trading)
-#   3-day: 7% max (slightly wider)
-#   Weekly: 10% max (medium stops for swing trading)
-#   Monthly: 20% max (wider stops for position trading)
 MAX_ALLOWED_STOP_LOSS_PCT = _TIMEFRAME_CONFIG['MAX_ALLOWED_STOP_LOSS_PCT']
 
-# Minimum risk/reward ratio to generate BUY/SELL signal
-# Auto-adjusted based on timeframe:
-#   Daily: 2.0:1 (higher standard for active trading)
-#   3-day: 1.8:1 (slightly relaxed)
-#   Weekly: 1.5:1 (standard Carney minimum)
-#   Monthly: 1.5:1 (standard Carney minimum)
-MIN_RISK_REWARD_RATIO = _TIMEFRAME_CONFIG['MIN_RISK_REWARD_RATIO']
+# Separate R/R filters for LONG (BUY) and SHORT (SELL) trades
+# LONG trades typically have higher R/R potential due to unlimited upside
+# SHORT trades have lower R/R due to limited downside (price can't go below 0)
+MIN_LONG_RISK_REWARD_RATIO = _TIMEFRAME_CONFIG['MIN_LONG_RISK_REWARD_RATIO']
+MIN_SHORT_RISK_REWARD_RATIO = _TIMEFRAME_CONFIG['MIN_SHORT_RISK_REWARD_RATIO']
+
+# Deprecated: Use MIN_LONG_RISK_REWARD_RATIO or MIN_SHORT_RISK_REWARD_RATIO instead
+MIN_RISK_REWARD_RATIO = MIN_LONG_RISK_REWARD_RATIO  # Backward compatibility
+
+# Maximum pattern age to include in signals (in days)
+# Filters out very old patterns that may no longer be relevant for trading
+# Long-term harmonic patterns should still be recent enough to be actionable
+# Default: 730 days (2 years) - focuses on patterns with recent market structure
+MAX_PATTERN_AGE_DAYS = 1850
+
+# ============================================================================
+# POSITION SIZING SETTINGS
+# ============================================================================
+# Position sizing for partial exits at T1, T2, T3
+# These percentages must sum to 1.0 (100%)
+# Based on deep dive analysis showing:
+#   - T1 hitting 66.7% of LONG trades (take more profit early)
+#   - T2 hitting 40.7% of LONG trades (median move)
+#   - T3 hitting 27.8% of LONG trades (reduced allocation)
+
+POSITION_SIZE_T1 = 0.20  # 20% exit at Target 1
+POSITION_SIZE_T2 = 0.30  # 30% exit at Target 2
+POSITION_SIZE_T3 = 0.50  # 50% exit at Target 3
+
+# Verify position sizing sums to 100%
+assert abs(POSITION_SIZE_T1 + POSITION_SIZE_T2 + POSITION_SIZE_T3 - 1.0) < 0.001, \
+    "Position sizing must sum to 100%"
 
 # ============================================================================
 # TAKE PROFIT STRATEGY SETTINGS
@@ -246,14 +236,15 @@ def get_stock_list() -> list:
     Returns:
         List of ticker symbols
     """
-    from stock_universe import get_stock_universe
+    from data.stock_universe import get_stock_universe
 
     return get_stock_universe(
         stocks_to_scan=STOCKS_TO_SCAN,
         etfs_to_scan=SCAN_ETFS,
         max_stocks=MAX_STOCKS_TO_SCAN,
         min_volume_usd=MIN_VOLUME_USD,
-        download_delay=DOWNLOAD_DELAY
+        download_delay=DOWNLOAD_DELAY,
+        timeframe = DATA_INTERVAL
     )
 
 
@@ -273,22 +264,8 @@ def get_settings_summary():
     print(f"  Trading Style: {_TIMEFRAME_CONFIG.get('TIMEFRAME_NOTES', 'N/A')}")
     print()
     print("PATTERN DETECTION (Optimized for timeframe):")
-    detection_engine = "pyharmonics HarmonicSearch" if USE_PYHARMONICS_HARMONIC_SEARCH else "Custom XABC→D Search"
-    print(f"  Detection Engine: {detection_engine}")
-    if USE_PYHARMONICS_HARMONIC_SEARCH:
-        print(f"    Fib Tolerance: {PYHARMONICS_FIB_TOLERANCE*100:.1f}%")
-        print(f"    Grading: A+ (perfect textbook) to C- (borderline at tolerance limit)")
-    else:
-        print(f"    Tolerance Levels: Textbook/Standard/Relaxed")
     print(f"  Swing Window: {SWING_WINDOW}")
     print(f"  Max Days Since Pattern: {MAX_DAYS_SINCE_PATTERN} days")
-    print()
-    print("SWING DETECTION (Advanced Features):")
-    print(f"  Micro-Swing Mode: {'Enabled' if ENABLE_MICRO_SWING_MODE else 'Disabled'} (2-bar minimum)")
-    print(f"  Multi-Swing BC: {'Enabled' if ENABLE_MULTI_SWING_BC else 'Disabled'}")
-    if ENABLE_MULTI_SWING_BC:
-        print(f"    Min magnitude: {MULTI_SWING_BC_MIN_MAGNITUDE:.3f} of BC leg")
-        print(f"    Internal swing range: {MULTI_SWING_BC_MIN_COUNT}-{MULTI_SWING_BC_MAX_COUNT} swings")
     print()
     print("DATA SETTINGS:")
     print(f"  Data Period: {DATA_PERIOD}")
@@ -296,7 +273,13 @@ def get_settings_summary():
     print()
     print("RISK MANAGEMENT (Optimized for timeframe):")
     print(f"  Stop Loss Range: {MIN_ALLOWED_STOP_LOSS_PCT}% - {MAX_ALLOWED_STOP_LOSS_PCT}%")
-    print(f"  Min Risk/Reward Ratio: {MIN_RISK_REWARD_RATIO}:1")
+    print(f"  Min R/R - LONG (BUY):  {MIN_LONG_RISK_REWARD_RATIO}:1")
+    print(f"  Min R/R - SHORT (SELL): {MIN_SHORT_RISK_REWARD_RATIO}:1")
+    print()
+    print("POSITION SIZING:")
+    print(f"  T1 Exit: {POSITION_SIZE_T1*100:.0f}%")
+    print(f"  T2 Exit: {POSITION_SIZE_T2*100:.0f}%")
+    print(f"  T3 Exit: {POSITION_SIZE_T3*100:.0f}%")
     print()
     print("SCANNING SETTINGS:")
     # Stock Universe

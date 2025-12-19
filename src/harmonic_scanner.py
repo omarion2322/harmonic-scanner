@@ -18,6 +18,7 @@ import time
 
 from pattern_detector import PatternDetector
 from reaction_detector import ReactionDetector
+from pattern_tracker import PatternTracker, PatternStatus
 
 warnings.filterwarnings('ignore')
 
@@ -50,6 +51,7 @@ class HarmonicScanner:
     def __init__(self):
         self.detector = PatternDetector()  # Uses Carney's exact specifications
         self.reaction_detector = ReactionDetector()  # Type 1 and Type 2 reaction detection
+        self.tracker = PatternTracker(storage_dir="./pattern_tracking")  # Pattern state tracking
 
     def get_sp500_tickers(self) -> List[str]:
         """
@@ -192,10 +194,13 @@ class HarmonicScanner:
             days_since = (today - pattern_date).days
             latest_pattern.days_since_completion = days_since
 
+            # Use MAX_DAYS_SINCE_PATTERN from config for filtering patterns by completion date
+            # Falls back to default (730 days) if not set
+            max_pattern_age = getattr(config, 'MAX_DAYS_SINCE_PATTERN', None)
             signal, explanation = self.detector.generate_signal(
                 latest_pattern,
                 current_price,
-                max_days_old=config.MAX_DAYS_SINCE_PATTERN,
+                max_days_old=max_pattern_age,
                 verbose=verbose
             )
 
@@ -290,6 +295,13 @@ class HarmonicScanner:
 
         results = {'BUY': [], 'SELL': [], 'HOLD': []}
 
+        # Track patterns across scans
+        tracked_stats = {
+            'confirmed': 0,
+            'watchlist': 0,
+            'invalidated': 0
+        }
+
         for i, ticker in enumerate(tickers, 1):
             # Progress update every 10 stocks
             if i % 10 == 0:
@@ -299,6 +311,70 @@ class HarmonicScanner:
             verbose = config.VERBOSE_REPORTS if hasattr(config, 'VERBOSE_REPORTS') else False
             analysis = self.scan_stock(ticker, verbose=verbose)
             results[analysis['signal']].append(analysis)
+
+            # Update pattern tracker with completed AND forming patterns
+            # Get price data for tracking and forming pattern detection
+            try:
+                import yfinance as yf
+                from pyharmonics import OHLCTechnicals as Technicals
+                from pyharmonics.search import HarmonicSearch
+
+                stock = yf.Ticker(ticker)
+                data_interval = config.DATA_INTERVAL if hasattr(config, 'DATA_INTERVAL') else '1wk'
+                data_period = config.DATA_PERIOD if hasattr(config, 'DATA_PERIOD') else '2y'
+                df = stock.history(period=data_period, interval=data_interval, auto_adjust=False)
+
+                if not df.empty and len(df) >= 50:
+                    df.columns = [c.lower() for c in df.columns]
+
+                    # Collect all patterns (completed + forming)
+                    all_patterns = []
+
+                    # Add completed patterns from analysis
+                    if analysis.get('patterns'):
+                        all_patterns.extend(analysis['patterns'])
+
+                    # Detect forming patterns (85-100% complete)
+                    try:
+                        swing_window = config.SWING_WINDOW if hasattr(config, 'SWING_WINDOW') else 3
+                        tech = Technicals(df, ticker, data_interval, peak_spacing=swing_window)
+                        fib_tolerance = config.PYHARMONICS_FIB_TOLERANCE if hasattr(config, 'PYHARMONICS_FIB_TOLERANCE') else 0.03
+                        h = HarmonicSearch(tech, fib_tolerance=fib_tolerance, check_anchor=True)
+
+                        # Detect patterns 85% complete
+                        h.forming(limit_to=10, percent_c_to_d=0.85)
+                        forming = h.get_patterns(family=h.XABCD, formed=False)
+
+                        # Convert forming patterns to HarmonicPattern objects
+                        for py_pattern in forming.get(h.XABCD, []):
+                            converted = self.detector._convert_pyharmonics_pattern(
+                                py_pattern, df, tech, fib_tolerance
+                            )
+                            if converted:
+                                all_patterns.append(converted)
+
+                    except Exception as e:
+                        if verbose:
+                            print(f"  Warning: Could not detect forming patterns for {ticker}: {e}")
+
+                    # Update tracker with all patterns
+                    if all_patterns:
+                        current_date = datetime.now()
+                        tracked = self.tracker.update_patterns(
+                            ticker=ticker,
+                            detected_patterns=all_patterns,
+                            price_data=df,
+                            current_date=current_date
+                        )
+
+                        # Update stats
+                        tracked_stats['confirmed'] += len(tracked.get('confirmed', []))
+                        tracked_stats['watchlist'] += len(tracked.get('watchlist', []))
+                        tracked_stats['invalidated'] += len(tracked.get('invalidated', []))
+
+            except Exception as e:
+                if verbose:
+                    print(f"  Warning: Could not update tracker for {ticker}: {e}")
 
             # Small delay to avoid rate limiting (from config)
             delay = config.DOWNLOAD_DELAY if hasattr(config, 'DOWNLOAD_DELAY') else 0.1
@@ -313,6 +389,15 @@ class HarmonicScanner:
         print(f"SELL signals: {len(results['SELL'])}")
         print(f"HOLD signals: {len(results['HOLD'])}")
         print()
+        print("PATTERN TRACKING:")
+        print(f"Confirmed patterns (Type 1/2): {tracked_stats['confirmed']}")
+        print(f"Watchlist (forming patterns): {tracked_stats['watchlist']}")
+        print(f"Invalidated (D extended): {tracked_stats['invalidated']}")
+        print()
+
+        # Store tracker summary in results for report generation
+        results['_tracker_summary'] = self.tracker.get_summary()
+        results['_tracked_stats'] = tracked_stats
 
         return results
 
@@ -337,10 +422,21 @@ class HarmonicScanner:
         # Summary
         report_lines.append("SUMMARY")
         report_lines.append("-"*80)
-        report_lines.append(f"Total Stocks Scanned: {sum(len(v) for v in results.values())}")
+        total_scanned = sum(len(v) for k, v in results.items() if not k.startswith('_'))
+        report_lines.append(f"Total Stocks Scanned: {total_scanned}")
         report_lines.append(f"BUY Signals: {len(results['BUY'])}")
         report_lines.append(f"SELL Signals: {len(results['SELL'])}")
         report_lines.append(f"HOLD Signals: {len(results['HOLD'])}")
+
+        # Add tracker stats if available
+        tracked_stats = results.get('_tracked_stats', {})
+        if tracked_stats:
+            report_lines.append("")
+            report_lines.append("Pattern Tracking:")
+            report_lines.append(f"  Confirmed (Type 1/2 Reactions): {tracked_stats.get('confirmed', 0)}")
+            report_lines.append(f"  Watchlist (Forming Patterns): {tracked_stats.get('watchlist', 0)}")
+            report_lines.append(f"  Invalidated (D Extended): {tracked_stats.get('invalidated', 0)}")
+
         report_lines.append("")
 
         # BUY signals
@@ -360,7 +456,8 @@ class HarmonicScanner:
                     pattern = analysis['patterns'][0]
                     report_lines.append("")
                     report_lines.append(f"  Pattern: {pattern.pattern_type.upper()} ({'BULLISH' if pattern.is_bullish else 'BEARISH'})")
-                    report_lines.append(f"  Grade: {pattern.grade} | Quality: {pattern.pattern_quality} | Tolerance: {pattern.tolerance_level}")
+                    report_lines.append(f"  Grade: {pattern.grade} | Tolerance: {pattern.tolerance_level}")
+                    report_lines.append(f"  Trade Quality: {pattern.trade_quality}")
                     report_lines.append(f"  Entry: ${pattern.entry_price:.2f}")
                     report_lines.append(f"  Stop Loss: ${pattern.stop_loss:.2f}")
                     report_lines.append(f"  Target 1: ${pattern.ipo_target_1:.2f}")
@@ -374,18 +471,34 @@ class HarmonicScanner:
                     reaction = analysis['reaction_data']
                     report_lines.append("")
                     report_lines.append(f"  Reaction: {reaction.reaction_summary}")
+
+                    # Type 1 Status
                     if reaction.type1_detected:
+                        type1_status = "✓ HIT"
+                        price_info = f" - Price reached: ${reaction.type1_max_move:.2f}" if reaction.type1_max_move else ""
                         targets_hit = []
                         if reaction.type1_reached_382:
-                            targets_hit.append("38.2%")
+                            targets_hit.append("38.2% of CD")
                         if reaction.type1_reached_618:
-                            targets_hit.append("61.8%")
+                            targets_hit.append("61.8% of CD")
                         if targets_hit:
-                            report_lines.append(f"    Type 1 Targets Hit: {', '.join(targets_hit)}")
-                        if reaction.type1_trendline_broken:
-                            report_lines.append(f"    ⚠ Type 1 Trendline Broken - Watching for Type 2")
+                            price_info += f" ({', '.join(targets_hit)})"
+                    else:
+                        type1_status = "✗ NOT HIT"
+                        price_info = ""
+                    report_lines.append(f"    Type 1: {type1_status}{price_info}")
+
+                    # Type 2 Status
                     if reaction.type2_detected:
-                        report_lines.append(f"    Type 2 Reversal Confirmed - PRZ Retested")
+                        type2_status = "✓ HIT"
+                        price_info = f" - Price reached: ${reaction.type2_terminal_bar_price:.2f}" if reaction.type2_terminal_bar_price else ""
+                        type2_info = []
+                        # Note: b_level_broken and cd_886_exceeded are in type2_data dict, need to track them
+                        price_info += " (Broke B level or exceeded 88.6% of CD)"
+                    else:
+                        type2_status = "✗ NOT HIT"
+                        price_info = ""
+                    report_lines.append(f"    Type 2: {type2_status}{price_info}")
 
                 # Add chart reference if available
                 if analysis.get('chart_path'):
@@ -412,7 +525,8 @@ class HarmonicScanner:
                     pattern = analysis['patterns'][0]
                     report_lines.append("")
                     report_lines.append(f"  Pattern: {pattern.pattern_type.upper()} ({'BULLISH' if pattern.is_bullish else 'BEARISH'})")
-                    report_lines.append(f"  Grade: {pattern.grade} | Quality: {pattern.pattern_quality} | Tolerance: {pattern.tolerance_level}")
+                    report_lines.append(f"  Grade: {pattern.grade} | Tolerance: {pattern.tolerance_level}")
+                    report_lines.append(f"  Trade Quality: {pattern.trade_quality}")
                     report_lines.append(f"  Entry: ${pattern.entry_price:.2f}")
                     report_lines.append(f"  Stop Loss: ${pattern.stop_loss:.2f}")
                     report_lines.append(f"  Target 1: ${pattern.ipo_target_1:.2f}")
@@ -426,18 +540,34 @@ class HarmonicScanner:
                     reaction = analysis['reaction_data']
                     report_lines.append("")
                     report_lines.append(f"  Reaction: {reaction.reaction_summary}")
+
+                    # Type 1 Status
                     if reaction.type1_detected:
+                        type1_status = "✓ HIT"
+                        price_info = f" - Price reached: ${reaction.type1_max_move:.2f}" if reaction.type1_max_move else ""
                         targets_hit = []
                         if reaction.type1_reached_382:
-                            targets_hit.append("38.2%")
+                            targets_hit.append("38.2% of CD")
                         if reaction.type1_reached_618:
-                            targets_hit.append("61.8%")
+                            targets_hit.append("61.8% of CD")
                         if targets_hit:
-                            report_lines.append(f"    Type 1 Targets Hit: {', '.join(targets_hit)}")
-                        if reaction.type1_trendline_broken:
-                            report_lines.append(f"    ⚠ Type 1 Trendline Broken - Watching for Type 2")
+                            price_info += f" ({', '.join(targets_hit)})"
+                    else:
+                        type1_status = "✗ NOT HIT"
+                        price_info = ""
+                    report_lines.append(f"    Type 1: {type1_status}{price_info}")
+
+                    # Type 2 Status
                     if reaction.type2_detected:
-                        report_lines.append(f"    Type 2 Reversal Confirmed - PRZ Retested")
+                        type2_status = "✓ HIT"
+                        price_info = f" - Price reached: ${reaction.type2_terminal_bar_price:.2f}" if reaction.type2_terminal_bar_price else ""
+                        type2_info = []
+                        # Note: b_level_broken and cd_886_exceeded are in type2_data dict, need to track them
+                        price_info += " (Broke B level or exceeded 88.6% of CD)"
+                    else:
+                        type2_status = "✗ NOT HIT"
+                        price_info = ""
+                    report_lines.append(f"    Type 2: {type2_status}{price_info}")
 
                 # Add chart reference if available
                 if analysis.get('chart_path'):
@@ -473,15 +603,49 @@ class HarmonicScanner:
                 else:
                     report_lines.append(f"Reason: {analysis['reason']}")
 
-                # Charts should NOT be generated for HOLD signals anymore
-                # (only for BUY/SELL signals)
-
                 report_lines.append("-"*80)
                 report_lines.append("")
 
             if len(results['HOLD']) > max_hold_display:
                 report_lines.append(f"... and {len(results['HOLD']) - max_hold_display} more HOLD signals")
                 report_lines.append("")
+
+        # MONITORING - Patterns approaching D point (forming patterns)
+        tracker_summary = results.get('_tracker_summary', {})
+        if tracker_summary:
+            # Get watchlist (forming patterns - haven't reached D point yet)
+            watchlist = self.tracker.get_active_patterns(status=PatternStatus.FORMING)
+
+            if watchlist:
+                report_lines.append("="*80)
+                report_lines.append(f"MONITORING - PATTERNS MATURING ({len(watchlist)})")
+                report_lines.append("="*80)
+                report_lines.append("Patterns approaching D-point but haven't reached it yet.")
+                report_lines.append("="*80)
+                report_lines.append("")
+
+                for pattern in sorted(watchlist, key=lambda p: p.completion_percentage, reverse=True)[:20]:
+                    report_lines.append(f"Ticker: {pattern.ticker}")
+                    report_lines.append(f"Pattern: {pattern.pattern_type.upper()} ({'BULLISH' if pattern.is_bullish else 'BEARISH'})")
+                    report_lines.append(f"Completion: {pattern.completion_percentage*100:.1f}%")
+                    report_lines.append(f"Grade: {pattern.grade} | R/R: {pattern.risk_reward:.2f}:1")
+
+                    # Calculate D-point range (PRZ zone)
+                    # D point is the entry price, and we show a range around it
+                    d_target = pattern.entry_price
+                    tolerance_pct = 0.02  # 2% tolerance for PRZ
+                    d_low = d_target * (1 - tolerance_pct)
+                    d_high = d_target * (1 + tolerance_pct)
+
+                    report_lines.append(f"D-Point Range: ${d_low:.2f} - ${d_high:.2f} (Target: ${d_target:.2f})")
+                    report_lines.append(f"Projected Entry: ${pattern.entry_price:.2f} | Projected Stop: ${pattern.stop_loss:.2f}")
+                    report_lines.append(f"Days Monitored: {pattern.days_monitored}")
+                    report_lines.append("-"*80)
+                    report_lines.append("")
+
+                if len(watchlist) > 20:
+                    report_lines.append(f"... and {len(watchlist) - 20} more forming patterns")
+                    report_lines.append("")
 
         report_lines.append("="*80)
         report_lines.append("END OF REPORT")
