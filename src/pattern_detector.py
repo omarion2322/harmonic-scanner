@@ -76,6 +76,7 @@ class HarmonicPattern:
     grade: str = "B"  # A+, A, A-, B+, B, B-, C+, C, C-
     trade_quality: str = "Standard Trade"  # High-Probability Entry, Standard Trade, Standard / Reduced Size, Marginal / Scalp Only
     chart_path: str = ""  # Path to pattern visualization chart
+    tp_strategy_used: str = ""  # Which TP strategy was used (e.g., "Scoring Engine", "Fixed", "Fibonacci")
 
     # Multi-swing BC leg metadata
     is_multi_swing_bc: bool = False  # True if BC leg contains multiple internal swings
@@ -180,7 +181,7 @@ class PatternDetector:
         rejected_count = 0
 
         for py_pattern in xabcd_patterns:
-            carney_pattern = self._convert_pyharmonics_pattern(py_pattern, df, tech, fib_tolerance)
+            carney_pattern = self._convert_pyharmonics_pattern(py_pattern, df, tech, fib_tolerance, symbol)
             if carney_pattern:
                 detected_patterns.append(carney_pattern)
             else:
@@ -193,7 +194,7 @@ class PatternDetector:
 
         return detected_patterns
 
-    def _convert_pyharmonics_pattern(self, py_pattern, df: pd.DataFrame, tech: Technicals, fib_tolerance: float) -> Optional[HarmonicPattern]:
+    def _convert_pyharmonics_pattern(self, py_pattern, df: pd.DataFrame, tech: Technicals, fib_tolerance: float, symbol: str) -> Optional[HarmonicPattern]:
         """
         Convert pyharmonics XABCDPattern to our HarmonicPattern format with trading specs.
 
@@ -202,6 +203,7 @@ class PatternDetector:
             df: Price dataframe for date lookups
             tech: Technicals object for peak data
             fib_tolerance: Fibonacci tolerance used for pattern detection (e.g., 0.03 = 3%)
+            symbol: Stock ticker symbol
 
         Returns:
             HarmonicPattern with Carney trading specs, or None if conversion fails
@@ -315,12 +317,14 @@ class PatternDetector:
                 b_price=b_price,
                 c_price=c_price,
                 d_price=d_price,
-                d_index=d_index
+                d_index=d_index,
+                ticker=symbol
             )
 
             ipo_target_1 = tp_targets.primary
             ipo_target_2 = tp_targets.secondary
             target_point_a = tp_targets.final if tp_targets.final else a_price
+            tp_strategy_used = tp_targets.tp_strategy_used if hasattr(tp_targets, 'tp_strategy_used') else ""
 
             # Check if TP strategy has custom stop loss calculation
             max_allowed_stop_loss_pct = config.MAX_ALLOWED_STOP_LOSS_PCT if hasattr(config, 'MAX_ALLOWED_STOP_LOSS_PCT') else 10.0
@@ -399,6 +403,7 @@ class PatternDetector:
                 tolerance_level=tolerance_level,
                 grade=grade,
                 trade_quality=trade_quality,
+                tp_strategy_used=tp_strategy_used,
                 # Multi-swing BC not detected from pyharmonics
                 is_multi_swing_bc=False,
                 bc_internal_swing_count=0,
@@ -408,7 +413,7 @@ class PatternDetector:
 
         except Exception as e:
             # If conversion fails, skip this pattern
-            print(f"Warning: Failed to convert pyharmonics pattern {py_pattern.name}: {e}")
+            print(f"Warning: [{symbol}] Failed to convert pyharmonics pattern {py_pattern.name}: {e}")
             return None
 
     def _validate_temporal_proportionality(self, x_ts, a_ts, b_ts, c_ts, d_ts) -> tuple:
@@ -1088,7 +1093,7 @@ class PatternDetector:
         direction = "BULLISH" if pattern.is_bullish else "BEARISH"
         interval_name = {'1d': 'Daily', '1wk': 'Weekly', '1mo': 'Monthly'}.get(interval, interval.upper())
         title = f"{ticker} - {direction} {pattern.pattern_type.upper()}"
-        subtitle = f"{interval_name} Chart | Grade: {pattern.grade} ({pattern.trade_quality}) | Detected: {pattern.d.date.date()} | R/R: {pattern.risk_reward:.2f}:1"
+        subtitle = f"{interval_name} Chart | Grade: {pattern.grade} | Detected: {pattern.d.date.date()} | R/R: {pattern.risk_reward:.2f}:1"
         ax.set_title(f"{title}\n{subtitle}", fontsize=14, fontweight='bold')
         ax.set_xlabel('Date', fontsize=12)
         ax.set_ylabel('Price ($)', fontsize=12)
@@ -1124,6 +1129,11 @@ class PatternDetector:
         # Calculate risk percentage
         risk_pct = abs((pattern.entry_price - pattern.stop_loss) / pattern.entry_price * 100)
 
+        # Determine TP strategy display text
+        tp_strategy_display = ""
+        if hasattr(pattern, 'tp_strategy_used') and pattern.tp_strategy_used:
+            tp_strategy_display = f"\nStrategy: {pattern.tp_strategy_used}"
+
         # Enhanced pattern info box (TOP LEFT)
         info_text = (
             f"TRADING LEVELS\n"
@@ -1136,7 +1146,7 @@ class PatternDetector:
             f"{'─'*20}\n"
             f"T1: ${pattern.ipo_target_1:.2f}\n"
             f"T2: ${pattern.ipo_target_2:.2f}\n"
-            f"T3: ${pattern.target_point_a:.2f}\n"
+            f"T3: ${pattern.target_point_a:.2f}{tp_strategy_display}\n"
             f"\n"
             f"PATTERN METRICS\n"
             f"{'─'*20}\n"

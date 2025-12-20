@@ -18,12 +18,12 @@ Based on practical trading considerations:
 # ============================================================================
 DAILY_CONFIG = {
     'SWING_WINDOW': 3,
-    'MAX_DAYS_SINCE_PATTERN': 1450,
+    'MAX_DAYS_SINCE_PATTERN': 7,
     'DATA_PERIOD': '4y',
     'MIN_ALLOWED_STOP_LOSS_PCT': 8.0,
     'MAX_ALLOWED_STOP_LOSS_PCT': 12.0,
-    'MIN_LONG_RISK_REWARD_RATIO': 1.5,   # LONG (BUY) patterns
-    'MIN_SHORT_RISK_REWARD_RATIO': 1.2,  # SHORT (SELL) patterns - lower due to limited downside
+    'MIN_LONG_RISK_REWARD_RATIO': 3.0,   # LONG (BUY) patterns
+    'MIN_SHORT_RISK_REWARD_RATIO': 2.2,  # SHORT (SELL) patterns - lower due to limited downside
     'TIMEFRAME_NOTES': 'Active trading - Quick moves, tight stops, frequent monitoring'
 }
 
@@ -48,12 +48,12 @@ THREE_DAY_CONFIG = {
 # ============================================================================
 WEEKLY_CONFIG = {
     'SWING_WINDOW': 4,
-    'MAX_DAYS_SINCE_PATTERN': 1500,
+    'MAX_DAYS_SINCE_PATTERN': 365,
     'DATA_PERIOD': '5y',
     'MIN_ALLOWED_STOP_LOSS_PCT': 8.0,
     'MAX_ALLOWED_STOP_LOSS_PCT': 15.0,
-    'MIN_LONG_RISK_REWARD_RATIO': 8.0,   # LONG (BUY) patterns - deep dive shows R/R 8-20 has 77% P&L
-    'MIN_SHORT_RISK_REWARD_RATIO': 2.5,  # SHORT (SELL) patterns - performs well at 2.5+
+    'MIN_LONG_RISK_REWARD_RATIO': 10.0,   # LONG (BUY) patterns - deep dive shows R/R 8-20 has 77% P&L
+    'MIN_SHORT_RISK_REWARD_RATIO': 4,  # SHORT (SELL) patterns - performs well at 2.5+
     'TIMEFRAME_NOTES': 'Swing/Position trading - Multi-week holds, balanced risk/reward'
 }
 

@@ -39,15 +39,35 @@ class MitchStrategy(TPStrategy):
     measured moves, and moving averages.
     """
 
-    def __init__(self, swing_window: int = 5):
+    def __init__(self, swing_window: int = 5, use_tp_scoring_engine: bool = True, tp_min_spacing_pct: float = 20.0):
         """
         Initialize Mitch strategy.
 
         Args:
             swing_window: Window size for swing point detection (from config SWING_WINDOW)
                          This uses the entire stock history available in price_data
+            use_tp_scoring_engine: If True, use TP Scoring Engine for market structure targets
+            tp_min_spacing_pct: Minimum spacing percentage between TP targets (default 20%)
         """
         self.swing_window = swing_window
+        self.use_tp_scoring_engine = use_tp_scoring_engine
+        self.tp_min_spacing_pct = tp_min_spacing_pct
+
+        # Import TP Scoring Engine only if needed (lazy import to avoid circular dependency)
+        if self.use_tp_scoring_engine:
+            try:
+                import sys
+                from pathlib import Path
+                # Add src directory to path if not already there
+                src_path = Path(__file__).parent.parent
+                if str(src_path) not in sys.path:
+                    sys.path.insert(0, str(src_path))
+                from tp_scoring_engine import TPScoringEngine
+                self.TPScoringEngine = TPScoringEngine
+            except ImportError as e:
+                print(f"Warning: TP Scoring Engine not available: {e}")
+                print("Falling back to standard Mitch strategy")
+                self.use_tp_scoring_engine = False
 
     def calculate_targets(self,
                          pattern_high: float,
@@ -59,7 +79,8 @@ class MitchStrategy(TPStrategy):
                          b_price: float,
                          c_price: float,
                          d_price: float,
-                         d_index: int) -> TPTargets:
+                         d_index: int,
+                         ticker: str = None) -> TPTargets:
         """
         Calculate targets based on external market structure.
 
@@ -89,13 +110,13 @@ class MitchStrategy(TPStrategy):
             targets = self._calculate_bullish_targets(
                 d_price, pattern_high, pattern_low,
                 swing_highs, swing_lows, ma_20, ma_50,
-                historical_data
+                historical_data, ticker
             )
         else:
             targets = self._calculate_bearish_targets(
                 d_price, pattern_high, pattern_low,
                 swing_highs, swing_lows, ma_20, ma_50,
-                historical_data
+                historical_data, ticker
             )
 
         return targets
@@ -136,8 +157,48 @@ class MitchStrategy(TPStrategy):
                                    swing_lows: List[float],
                                    ma_20: float,
                                    ma_50: float,
-                                   historical_data: pd.DataFrame) -> TPTargets:
+                                   historical_data: pd.DataFrame,
+                                   ticker: str = None) -> TPTargets:
         """Calculate targets for bullish patterns using external structure."""
+
+        # CHECK IF TP SCORING ENGINE IS ENABLED
+        if self.use_tp_scoring_engine:
+            try:
+                # Initialize TP Scoring Engine with historical data
+                engine = self.TPScoringEngine(historical_data.copy(), atr_period=14)
+
+                # Get optimal targets using the scoring engine
+                tp1, tp2, tp3 = engine.get_optimal_targets(
+                    entry_price=d_price,
+                    direction="LONG",
+                    harmonic_targets=None,  # Could pass pattern projections for alignment
+                    min_spacing_pct=self.tp_min_spacing_pct
+                )
+
+                if tp1 is not None:
+                    # Calculate percentages for description
+                    tp1_pct = ((tp1 - d_price) / d_price) * 100
+                    tp2_pct = ((tp2 - d_price) / d_price) * 100
+                    tp3_pct = ((tp3 - d_price) / d_price) * 100
+
+                    desc = f"Mitch Ray (TP Engine): T1 @ {tp1:.2f} (+{tp1_pct:.0f}%), T2 @ {tp2:.2f} (+{tp2_pct:.0f}%), T3 @ {tp3:.2f} (+{tp3_pct:.0f}%)"
+
+                    return TPTargets(
+                        primary=tp1,
+                        secondary=tp2,
+                        final=tp3,
+                        description=desc,
+                        tp_strategy_used="Scoring Engine"
+                    )
+                else:
+                    ticker_info = f"[{ticker}] " if ticker else ""
+                    print(f"Warning: {ticker_info}TP Scoring Engine found no valid zones, falling back to standard method")
+            except Exception as e:
+                ticker_info = f"[{ticker}] " if ticker else ""
+                print(f"Warning: {ticker_info}TP Scoring Engine failed: {e}")
+                print(f"{ticker_info}Falling back to standard Mitch strategy")
+
+        # STANDARD METHOD: Fixed percentages from analysis
         # FINAL OPTIMIZATION from deep dive analysis (54 LONG trades, Grade B-+)
         # Analysis showed:
         #   - Actual T1 avg distance: 73.8% (66.7% hit rate)
@@ -149,8 +210,8 @@ class MitchStrategy(TPStrategy):
         #   T2 @ 130% = Matches actual average, median move level (40%+ hit rate)
         #   T3 @ 200% = Realistic stretch target based on actual data (25%+ hit rate)
         MIN_TARGET_DISTANCE_PCT = 75.0   # T1 - matches actual 73.8% average
-        TARGET_T2_PCT = 161.0            # T2 - matches actual 128.2% average
-        TARGET_T3_PCT = 250.0            # T3 - realistic based on 179.5% avg
+        TARGET_T2_PCT = 200.0       # T2 - matches actual 128.2% average - was 161 previously
+        TARGET_T3_PCT = 400.0            # T3 - realistic based on 179.5% avg - was 250 previously
 
         # SIMPLIFIED: Calculate targets directly at fixed percentages
         # No complex candidate selection - just use the percentages we determined from data
@@ -169,7 +230,8 @@ class MitchStrategy(TPStrategy):
             primary=primary,
             secondary=secondary,
             final=final,
-            description=desc
+            description=desc,
+            tp_strategy_used="Fixed"
         )
 
     def _calculate_bearish_targets(self,
@@ -180,7 +242,8 @@ class MitchStrategy(TPStrategy):
                                    swing_lows: List[float],
                                    ma_20: float,
                                    ma_50: float,
-                                   historical_data: pd.DataFrame) -> TPTargets:
+                                   historical_data: pd.DataFrame,
+                                   ticker: str = None) -> TPTargets:
         """Calculate targets for bearish patterns using external structure."""
         # DATA-DRIVEN OPTIMIZATION from actual trade analysis (29 SHORT trades, Grade B-+, R/R 3+)
         # Actual median max move: 47.7%, average: 47.0%
@@ -211,7 +274,8 @@ class MitchStrategy(TPStrategy):
             primary=primary,
             secondary=secondary,
             final=final,
-            description=desc
+            description=desc,
+            tp_strategy_used="Fixed"
         )
 
     def _fallback_targets(self, pattern_high: float, pattern_low: float, is_bullish: bool) -> TPTargets:
@@ -237,7 +301,8 @@ class MitchStrategy(TPStrategy):
             primary=primary,
             secondary=secondary,
             final=final,
-            description=description
+            description=description,
+            tp_strategy_used="Fixed"
         )
 
     def _find_strongest_support_resistance(self,

@@ -98,10 +98,20 @@ SCAN_ETFS = True
 
 CRYPTOS_TO_SCAN = 'Top100'  # Options: 'Top100', 'Top50', 'Top20', or None
 
-# Minimum average daily volume in USD (applies to 'All' Nasdaq mode only)
+# Volume filtering mode (applies to 'All' Nasdaq mode only)
+# If True: Filter by share volume (MIN_VOLUME_STOCKS)
+# If False: Filter by dollar volume (MIN_VOLUME_USD)
+FILTER_BY_STOCK_VOLUME = False
+
+# Minimum average daily DOLLAR volume (used when FILTER_BY_STOCK_VOLUME = False)
 # Filters stocks to ensure liquidity for harmonic pattern trading
-# Default: $1,000,000 USD average daily dollar volume
+# Default: $1,000,000 USD average daily dollar volume (price × shares)
 MIN_VOLUME_USD = 1_000_000
+
+# Minimum average daily SHARE volume (used when FILTER_BY_STOCK_VOLUME = True)
+# Filters stocks by number of shares traded, regardless of price
+# Default: 1,000,000 shares average daily volume
+MIN_VOLUME_STOCKS = 1_000_000
 
 # Maximum number of stocks to scan (None = all from selected universe)
 # Use a smaller number for testing (e.g., 50)
@@ -243,6 +253,8 @@ def get_stock_list() -> list:
         etfs_to_scan=SCAN_ETFS,
         max_stocks=MAX_STOCKS_TO_SCAN,
         min_volume_usd=MIN_VOLUME_USD,
+        min_volume_stocks=MIN_VOLUME_STOCKS,
+        filter_by_stock_volume=FILTER_BY_STOCK_VOLUME,
         download_delay=DOWNLOAD_DELAY,
         timeframe = DATA_INTERVAL
     )
@@ -285,7 +297,10 @@ def get_settings_summary():
     # Stock Universe
     if STOCKS_TO_SCAN and STOCKS_TO_SCAN.upper() != 'NONE':
         if STOCKS_TO_SCAN.upper() == 'ALL':
-            stock_desc = f"All Nasdaq stocks (volume > ${MIN_VOLUME_USD:,} USD)"
+            if FILTER_BY_STOCK_VOLUME:
+                stock_desc = f"All Nasdaq stocks (volume > {MIN_VOLUME_STOCKS:,} shares)"
+            else:
+                stock_desc = f"All Nasdaq stocks (volume > ${MIN_VOLUME_USD:,} USD)"
         elif STOCKS_TO_SCAN.upper() == 'SP500':
             stock_desc = "S&P 500 stocks"
         else:
@@ -301,7 +316,10 @@ def get_settings_summary():
         print(f"  ETF Universe: Disabled")
 
     if STOCKS_TO_SCAN and STOCKS_TO_SCAN.upper() == 'ALL':
-        print(f"  Min Volume Filter: ${MIN_VOLUME_USD:,} USD avg daily")
+        if FILTER_BY_STOCK_VOLUME:
+            print(f"  Min Volume Filter: {MIN_VOLUME_STOCKS:,} shares avg daily (SHARE volume mode)")
+        else:
+            print(f"  Min Volume Filter: ${MIN_VOLUME_USD:,} USD avg daily (DOLLAR volume mode)")
     print(f"  Max Tickers to Scan: {MAX_STOCKS_TO_SCAN if MAX_STOCKS_TO_SCAN else 'All from universe'}")
     print(f"  Download Delay: {DOWNLOAD_DELAY}s")
     print()

@@ -291,10 +291,12 @@ def analyze_trade(trade: Trade) -> Dict:
         status_parts = []
 
         # Determine which targets were hit before stop loss (if any)
-        # Use <= to handle same-day hits (assume targets hit before stop on same day)
-        t1_hit_before_stop = t1_hit and (not stop_hit or (stop_hit and t1_date <= stop_date))
-        t2_hit_before_stop = t2_hit and (not stop_hit or (stop_hit and t2_date <= stop_date))
-        t3_hit_before_stop = t3_hit and (not stop_hit or (stop_hit and t3_date <= stop_date))
+        # If target and stop hit on same day, we CANNOT determine intraday order from daily data
+        # CONSERVATIVE APPROACH: Count same-day hits as targets hitting BEFORE stop
+        # (Assume positive price movement happened first within the day)
+        t1_hit_before_stop = t1_hit and (not stop_hit or (stop_date is not None and t1_date is not None and t1_date <= stop_date))
+        t2_hit_before_stop = t2_hit and (not stop_hit or (stop_date is not None and t2_date is not None and t2_date <= stop_date))
+        t3_hit_before_stop = t3_hit and (not stop_hit or (stop_date is not None and t3_date is not None and t3_date <= stop_date))
 
         # Calculate P&L for each target hit before stop loss
         remaining_position = 1.0  # Track remaining position percentage
@@ -378,9 +380,9 @@ def analyze_trade(trade: Trade) -> Dict:
             'pnl': total_pnl,
             'pnl_percent': pnl_percent,
             'reason': reason,
-            't1_hit': t1_hit,
-            't2_hit': t2_hit,
-            't3_hit': t3_hit,
+            't1_hit': t1_hit_before_stop,  # Return whether target hit BEFORE stop, not just if it hit
+            't2_hit': t2_hit_before_stop,  # Return whether target hit BEFORE stop, not just if it hit
+            't3_hit': t3_hit_before_stop,  # Return whether target hit BEFORE stop, not just if it hit
             'stop_hit': stop_hit
         }
 
@@ -507,18 +509,18 @@ def main():
     except Exception as e:
         # Fallback to a default date if datetime fails
         print(f"Warning: Could not get current date ({e}). Using fallback date.")
-        date = '2025-12-13'
+        date = '2025-12-19'
 
     timeframe = '1wk'
-    min_grade = "B-"
+    min_grade = "C-"
     report_file = f'./reports/{date}/{timeframe}/harmonic_report_{date}_{timeframe}.txt'
 
     # Load configuration from config_timeframes.py
     config = get_timeframe_config(timeframe)
 
     # Configuration Parameters - Separate R/R filters for LONG vs SHORT
-    MIN_LONG_RR = 5.0    # LONG (BUY) patterns - higher threshold
-    MIN_SHORT_RR = 2.5   # SHORT (SELL) patterns - lower threshold (limited downside)
+    MIN_LONG_RR = 10.0    # LONG (BUY) patterns - higher threshold - 15 was best for $ volume
+    MIN_SHORT_RR = 4   # SHORT (SELL) patterns - lower threshold (limited downside) - 6 was best for $ volume
     TRADING_ALGO_USED = TP_STRATEGY
     SWING_WINDOW = config['SWING_WINDOW']
     DATA_PERIOD = config['DATA_PERIOD']

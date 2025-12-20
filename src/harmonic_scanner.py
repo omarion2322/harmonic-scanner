@@ -348,7 +348,7 @@ class HarmonicScanner:
                         # Convert forming patterns to HarmonicPattern objects
                         for py_pattern in forming.get(h.XABCD, []):
                             converted = self.detector._convert_pyharmonics_pattern(
-                                py_pattern, df, tech, fib_tolerance
+                                py_pattern, df, tech, fib_tolerance, ticker
                             )
                             if converted:
                                 all_patterns.append(converted)
@@ -457,12 +457,14 @@ class HarmonicScanner:
                     report_lines.append("")
                     report_lines.append(f"  Pattern: {pattern.pattern_type.upper()} ({'BULLISH' if pattern.is_bullish else 'BEARISH'})")
                     report_lines.append(f"  Grade: {pattern.grade} | Tolerance: {pattern.tolerance_level}")
-                    report_lines.append(f"  Trade Quality: {pattern.trade_quality}")
                     report_lines.append(f"  Entry: ${pattern.entry_price:.2f}")
                     report_lines.append(f"  Stop Loss: ${pattern.stop_loss:.2f}")
                     report_lines.append(f"  Target 1: ${pattern.ipo_target_1:.2f}")
                     report_lines.append(f"  Target 2: ${pattern.ipo_target_2:.2f}")
                     report_lines.append(f"  Target 3: ${pattern.target_point_a:.2f}")
+                    # Add TP strategy indication
+                    if hasattr(pattern, 'tp_strategy_used') and pattern.tp_strategy_used:
+                        report_lines.append(f"  TP Targets: {pattern.tp_strategy_used}")
                     report_lines.append(f"  Risk/Reward: {pattern.risk_reward:.2f}:1")
                     report_lines.append(f"  Ratios: B={pattern.ab_xa_ratio:.3f}, BC_proj={pattern.bc_projection:.3f}, D={pattern.ad_xa_ratio:.3f}")
 
@@ -526,12 +528,14 @@ class HarmonicScanner:
                     report_lines.append("")
                     report_lines.append(f"  Pattern: {pattern.pattern_type.upper()} ({'BULLISH' if pattern.is_bullish else 'BEARISH'})")
                     report_lines.append(f"  Grade: {pattern.grade} | Tolerance: {pattern.tolerance_level}")
-                    report_lines.append(f"  Trade Quality: {pattern.trade_quality}")
                     report_lines.append(f"  Entry: ${pattern.entry_price:.2f}")
                     report_lines.append(f"  Stop Loss: ${pattern.stop_loss:.2f}")
                     report_lines.append(f"  Target 1: ${pattern.ipo_target_1:.2f}")
                     report_lines.append(f"  Target 2: ${pattern.ipo_target_2:.2f}")
                     report_lines.append(f"  Target 3: ${pattern.target_point_a:.2f}")
+                    # Add TP strategy indication
+                    if hasattr(pattern, 'tp_strategy_used') and pattern.tp_strategy_used:
+                        report_lines.append(f"  TP Targets: {pattern.tp_strategy_used}")
                     report_lines.append(f"  Risk/Reward: {pattern.risk_reward:.2f}:1")
                     report_lines.append(f"  Ratios: B={pattern.ab_xa_ratio:.3f}, BC_proj={pattern.bc_projection:.3f}, D={pattern.ad_xa_ratio:.3f}")
 
