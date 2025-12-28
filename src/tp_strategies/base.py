@@ -17,6 +17,7 @@ class TPTargets:
     secondary: float  # Second take profit level
     final: Optional[float] = None  # Final take profit level (if applicable)
     description: str = ""  # Description of the strategy targets
+    tp_strategy_used: str = ""  # Which TP strategy was used (e.g., "Scoring Engine", "Fixed")
 
 
 class TPStrategy(ABC):
@@ -41,7 +42,8 @@ class TPStrategy(ABC):
                          b_price: float,
                          c_price: float,
                          d_price: float,
-                         d_index: int) -> TPTargets:
+                         d_index: int,
+                         ticker: str = None) -> TPTargets:
         """
         Calculate take profit targets based on the strategy.
 
@@ -56,6 +58,7 @@ class TPStrategy(ABC):
             c_price: Point C price
             d_price: Point D price (entry point)
             d_index: Index of point D in price_data
+            ticker: Stock ticker symbol (for debugging/logging)
 
         Returns:
             TPTargets object with primary, secondary, and optional final targets

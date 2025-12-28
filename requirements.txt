@@ -9,7 +9,7 @@ scipy>=1.10.0
 
 # Plotting and visualization
 matplotlib>=3.7.0
-mplfinance>=0.12.9
+mplfinance>=0.12.10b0
 
 # Optional: Uncomment if you want technical indicators (requires system dependencies)
 # ta-lib>=0.4.28

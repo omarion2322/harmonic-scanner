@@ -85,6 +85,7 @@ class ReactionDetector:
                 terminal_bar_idx = len(df) - 1
 
         # Calculate profit targets (38.2% and 61.8% of pattern range)
+        # Type 1 uses retracement of full pattern range for better profit targets
         pattern_high = max(pattern.x.price, pattern.a.price, pattern.b.price,
                           pattern.c.price, pattern.d.price)
         pattern_low = min(pattern.x.price, pattern.a.price, pattern.b.price,
@@ -119,11 +120,9 @@ class ReactionDetector:
         type1_data = self._detect_type1(df, pattern, terminal_bar_idx,
                                        current_idx, target_382, target_618)
 
-        # If Type 1 detected and trendline broken, check for Type 2
-        type2_data = None
-        if type1_data['detected'] and type1_data.get('trendline_broken', False):
-            type2_data = self._detect_type2(df, pattern, terminal_bar_idx,
-                                          current_idx, type1_data)
+        # Check for Type 2 independently (doesn't require Type 1 first)
+        type2_data = self._detect_type2(df, pattern, terminal_bar_idx,
+                                      current_idx, type1_data)
 
         # Build ReactionData
         reaction = ReactionData(
@@ -238,7 +237,10 @@ class ReactionDetector:
     def _detect_type2(self, df: pd.DataFrame, pattern, terminal_bar_idx: int,
                      current_idx: int, type1_data: Dict) -> Dict:
         """
-        Detect Type 2 reversal (retest of PRZ after Type 1 reaction).
+        Detect Type 2 reversal based on:
+        1. Breaking key structural level (B)
+        2. Reaction exceeds 88.6% of CD
+        3. OR creates market structure shift
         """
         result = {
             'detected': False,
@@ -246,62 +248,68 @@ class ReactionDetector:
             'retest_date': None,
             'terminal_bar_idx': None,
             'terminal_bar_date': None,
-            'terminal_bar_price': None
+            'terminal_bar_price': None,
+            'b_level_broken': False,
+            'cd_886_exceeded': False
         }
 
         # Need sufficient bars to detect Type 2
         if current_idx - terminal_bar_idx < 5:
             return result
 
-        # Get data after Type 1 peak
-        type1_peak_idx = type1_data.get('reversal_bar_idx')
-        if type1_peak_idx is None:
-            return result
-
-        # Look for retest of PRZ (original D point area)
-        prz_center = pattern.d.price
-        prz_tolerance = abs(pattern.entry_price - pattern.stop_loss) * 0.1  # 10% of stop range
-
-        # Get data after Type 1 peak
+        # Get data after D point
         end_idx = min(terminal_bar_idx + self.max_type2_bars, current_idx + 1)
-        df_window = df.iloc[type1_peak_idx:end_idx]
+        df_window = df.iloc[terminal_bar_idx:end_idx]
 
         if len(df_window) < 2:
             return result
 
-        # Check for retest
+        # Calculate 88.6% of CD move
+        cd_range = abs(pattern.d.price - pattern.c.price)
+        b_price = pattern.b.price
+        d_price = pattern.d.price
+
         if pattern.is_bullish:
-            # Bullish: look for price coming back down to PRZ
-            for idx in df_window.index:
-                low = df_window.loc[idx, 'low']
-                if abs(low - prz_center) <= prz_tolerance:
-                    result['detected'] = True
-                    result['retest_bar_idx'] = df.index.get_loc(idx)
-                    result['retest_date'] = idx
+            # For bullish: Type 2 requires breaking above B and/or 88.6% CD retracement
+            target_886 = d_price + (cd_range * 0.886)
 
-                    # Find the lowest low in the retest area (Type 2 Terminal Bar)
-                    retest_window = df_window.loc[idx:]
-                    type2_terminal_idx = retest_window['low'].idxmin()
-                    result['terminal_bar_idx'] = df.index.get_loc(type2_terminal_idx)
-                    result['terminal_bar_date'] = type2_terminal_idx
-                    result['terminal_bar_price'] = retest_window.loc[type2_terminal_idx, 'low']
-                    break
+            # Check if price broke above B level
+            max_high = df_window['high'].max()
+            if max_high >= b_price:
+                result['b_level_broken'] = True
+
+            # Check if price exceeded 88.6% of CD
+            if max_high >= target_886:
+                result['cd_886_exceeded'] = True
+
+            # Type 2 detected if either condition met
+            if result['b_level_broken'] or result['cd_886_exceeded']:
+                result['detected'] = True
+                max_high_idx = df_window['high'].idxmax()
+                result['terminal_bar_idx'] = df.index.get_loc(max_high_idx)
+                result['terminal_bar_date'] = max_high_idx
+                result['terminal_bar_price'] = max_high
+
         else:
-            # Bearish: look for price coming back up to PRZ
-            for idx in df_window.index:
-                high = df_window.loc[idx, 'high']
-                if abs(high - prz_center) <= prz_tolerance:
-                    result['detected'] = True
-                    result['retest_bar_idx'] = df.index.get_loc(idx)
-                    result['retest_date'] = idx
+            # For bearish: Type 2 requires breaking below B and/or 88.6% CD retracement
+            target_886 = d_price - (cd_range * 0.886)
 
-                    # Find the highest high in the retest area
-                    retest_window = df_window.loc[idx:]
-                    type2_terminal_idx = retest_window['high'].idxmax()
-                    result['terminal_bar_idx'] = df.index.get_loc(type2_terminal_idx)
-                    result['terminal_bar_date'] = type2_terminal_idx
-                    result['terminal_bar_price'] = retest_window.loc[type2_terminal_idx, 'high']
-                    break
+            # Check if price broke below B level
+            min_low = df_window['low'].min()
+            if min_low <= b_price:
+                result['b_level_broken'] = True
+
+            # Check if price exceeded 88.6% of CD
+            if min_low <= target_886:
+                result['cd_886_exceeded'] = True
+
+            # Type 2 detected if either condition met
+            if result['b_level_broken'] or result['cd_886_exceeded']:
+                result['detected'] = True
+                min_low_idx = df_window['low'].idxmin()
+                result['terminal_bar_idx'] = df.index.get_loc(min_low_idx)
+                result['terminal_bar_date'] = min_low_idx
+                result['terminal_bar_price'] = min_low
 
         return result
 
@@ -328,20 +336,22 @@ class ReactionDetector:
         elif reaction.reaction_type == 'TYPE_1':
             targets_hit = []
             if reaction.type1_reached_618:
-                targets_hit.append("61.8%")
+                targets_hit.append("61.8% of CD")
             elif reaction.type1_reached_382:
-                targets_hit.append("38.2%")
+                targets_hit.append("38.2% of CD")
 
+            price_str = f" (reached ${reaction.type1_max_move:.2f})" if reaction.type1_max_move else ""
             if targets_hit:
-                return f"TYPE 1 REACTION: Quick reversal from PRZ, reached {' and '.join(targets_hit)} target(s)"
+                return f"TYPE 1 REACTION: Quick reversal from PRZ, reached {' and '.join(targets_hit)}{price_str}"
             else:
-                return f"TYPE 1 REACTION: Initial reversal from PRZ (targets not yet reached)"
+                return f"TYPE 1 REACTION: Initial reversal from PRZ{price_str}"
 
         elif reaction.reaction_type == 'TYPE_1_FAILED':
-            return f"TYPE 1 reaction started but trendline broken - watching for TYPE 2 retest"
+            return f"TYPE 1 reaction started but trendline broken - watching for TYPE 2"
 
         elif reaction.reaction_type == 'TYPE_2':
-            return f"TYPE 2 REVERSAL: PRZ retested and confirmed - larger reversal expected"
+            price_str = f" (reached ${reaction.type2_terminal_bar_price:.2f})" if reaction.type2_terminal_bar_price else ""
+            return f"TYPE 2 REVERSAL: Structural break confirmed - exceeded 88.6% of CD or broke B level{price_str}"
 
         return "Unknown reaction status"
 

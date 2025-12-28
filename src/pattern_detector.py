@@ -70,11 +70,17 @@ class HarmonicPattern:
     # PRZ (Potential Reversal Zone) levels
     prz_levels: Dict[str, float]
 
+    # D-Point Range (PRZ boundaries)
+    d_point_range_min: float = 0.0  # Minimum valid D-point price (lower bound of PRZ)
+    d_point_range_max: float = 0.0  # Maximum valid D-point price (upper bound of PRZ)
+
     days_since_completion: int = 0
-    pattern_quality: str = "STANDARD"  # EXCELLENT, GOOD, STANDARD
+    # pattern_quality: str = "STANDARD"  # EXCELLENT, GOOD, STANDARD - REMOVED
     tolerance_level: str = "Standard"  # Textbook, Standard, or Relaxed
-    grade: str = "B"  # A+, A, A-, B+, B, B-, C+, C
+    grade: str = "B"  # A+, A, A-, B+, B, B-, C+, C, C-
+    trade_quality: str = "Standard Trade"  # High-Probability Entry, Standard Trade, Standard / Reduced Size, Marginal / Scalp Only
     chart_path: str = ""  # Path to pattern visualization chart
+    tp_strategy_used: str = ""  # Which TP strategy was used (e.g., "Scoring Engine", "Fixed", "Fibonacci")
 
     # Multi-swing BC leg metadata
     is_multi_swing_bc: bool = False  # True if BC leg contains multiple internal swings
@@ -176,14 +182,23 @@ class PatternDetector:
 
         # Convert pyharmonics patterns to our format with Carney specs
         detected_patterns = []
+        rejected_count = 0
+
         for py_pattern in xabcd_patterns:
-            carney_pattern = self._convert_pyharmonics_pattern(py_pattern, df, tech, fib_tolerance)
+            carney_pattern = self._convert_pyharmonics_pattern(py_pattern, df, tech, fib_tolerance, symbol)
             if carney_pattern:
                 detected_patterns.append(carney_pattern)
+            else:
+                rejected_count += 1
+
+        # Show summary if patterns were rejected
+        verbose = config.VERBOSE_REPORTS if hasattr(config, 'VERBOSE_REPORTS') else False
+        if rejected_count > 0 and verbose:
+            print(f"  {symbol}: {rejected_count} pattern(s) rejected (invalid duration)")
 
         return detected_patterns
 
-    def _convert_pyharmonics_pattern(self, py_pattern, df: pd.DataFrame, tech: Technicals, fib_tolerance: float) -> Optional[HarmonicPattern]:
+    def _convert_pyharmonics_pattern(self, py_pattern, df: pd.DataFrame, tech: Technicals, fib_tolerance: float, symbol: str) -> Optional[HarmonicPattern]:
         """
         Convert pyharmonics XABCDPattern to our HarmonicPattern format with trading specs.
 
@@ -192,6 +207,7 @@ class PatternDetector:
             df: Price dataframe for date lookups
             tech: Technicals object for peak data
             fib_tolerance: Fibonacci tolerance used for pattern detection (e.g., 0.03 = 3%)
+            symbol: Stock ticker symbol
 
         Returns:
             HarmonicPattern with Carney trading specs, or None if conversion fails
@@ -221,6 +237,15 @@ class PatternDetector:
                           swing_type='PEAK' if is_bullish else 'TROUGH')
             d_point = Point(index=4, price=d_price, date=d_ts,
                           swing_type='TROUGH' if is_bullish else 'PEAK')
+
+            # Validate temporal proportionality
+            is_temporally_valid, temporal_reason = self._validate_temporal_proportionality(
+                x_ts, a_ts, b_ts, c_ts, d_ts
+            )
+
+            if not is_temporally_valid:
+                # Silently reject - will be summarized at ticker level
+                return None  # Reject pattern with invalid duration
 
             # Use Fibonacci ratios from pyharmonics (trust their calculations)
             # py_pattern.retraces contains:
@@ -265,6 +290,15 @@ class PatternDetector:
             # Calculate PRZ levels
             prz_levels = calculate_prz_levels(x_price, a_price, b_price, c_price, pattern_spec)
 
+            # Calculate D-point range (PRZ boundaries) around the actual detected D-point
+            # The PRZ is a zone, not a single price - entries anywhere in this zone are valid
+            # Use 2% tolerance as standard PRZ zone width (configurable)
+            prz_tolerance_pct = config.PRZ_TOLERANCE_PCT if hasattr(config, 'PRZ_TOLERANCE_PCT') else 0.02
+
+            # Calculate the range centered on the detected D-point
+            d_point_range_min = d_price * (1 - prz_tolerance_pct)
+            d_point_range_max = d_price * (1 + prz_tolerance_pct)
+
             # Stop loss using Carney's pattern-specific ratio
             stop_loss = calculate_stop_loss(pattern_spec, x_price, xa_range, is_bullish)
 
@@ -296,12 +330,14 @@ class PatternDetector:
                 b_price=b_price,
                 c_price=c_price,
                 d_price=d_price,
-                d_index=d_index
+                d_index=d_index,
+                ticker=symbol
             )
 
             ipo_target_1 = tp_targets.primary
             ipo_target_2 = tp_targets.secondary
             target_point_a = tp_targets.final if tp_targets.final else a_price
+            tp_strategy_used = tp_targets.tp_strategy_used if hasattr(tp_targets, 'tp_strategy_used') else ""
 
             # Check if TP strategy has custom stop loss calculation
             max_allowed_stop_loss_pct = config.MAX_ALLOWED_STOP_LOSS_PCT if hasattr(config, 'MAX_ALLOWED_STOP_LOSS_PCT') else 10.0
@@ -325,28 +361,38 @@ class PatternDetector:
             if strategy_stop_loss is not None:
                 stop_loss = strategy_stop_loss
 
-            # Risk/Reward calculation
+            # Risk/Reward calculation using WEIGHTED average based on position sizing
+            # Uses position sizing from config to ensure consistency with P&L calculations
+            # This gives a more accurate R/R that reflects actual trade potential
             risk = abs(entry_price - stop_loss)
             reward_t1 = abs(ipo_target_1 - entry_price)
             reward_t2 = abs(ipo_target_2 - entry_price)
             reward_t3 = abs(target_point_a - entry_price)
-            average_reward = (reward_t1 + reward_t2 + reward_t3) / 3
-            risk_reward = average_reward / risk if risk > 0 else 0
+            # Weighted average reward using config position sizing
+            weighted_reward = (reward_t1 * config.POSITION_SIZE_T1) + \
+                            (reward_t2 * config.POSITION_SIZE_T2) + \
+                            (reward_t3 * config.POSITION_SIZE_T3)
+            risk_reward = weighted_reward / risk if risk > 0 else 0
 
-            # Pattern quality assessment (for reference, but not used in grading for pyharmonics)
-            pattern_quality = self._assess_pattern_quality(
-                ab_xa, pattern_spec.b_point_min, pattern_spec.b_point_max,
-                bc_projection, pattern_spec.bc_projection_min, pattern_spec.bc_projection_max
-            )
+            # Pattern quality assessment - REMOVED
+            # pattern_quality = self._assess_pattern_quality(
+            #     ab_xa, pattern_spec.b_point_min, pattern_spec.b_point_max,
+            #     bc_projection, pattern_spec.bc_projection_min, pattern_spec.bc_projection_max
+            # )
 
             # For pyharmonics patterns, tolerance_level shows the fib_tolerance as percentage
             tolerance_level = f"{fib_tolerance*100:.1f}%"
 
-            # Calculate grade based on deviation from textbook ideals
-            # A+ = perfect textbook, C- = borderline (at tolerance limit)
+            # Calculate refined grade based on Scott Carney's hierarchy
+            # D-point accuracy (45%), PRZ convergence, and time symmetry
             grade = self._calculate_pyharmonics_grade(
-                ab_xa, ad_xa, bc_projection, pattern_spec, fib_tolerance
+                ab_xa, ad_xa, bc_projection, pattern_spec, fib_tolerance,
+                x_price, a_price, b_price, c_price, d_price,
+                x_ts, a_ts, b_ts, c_ts, d_ts
             )
+
+            # Determine trade quality tier based on grade
+            trade_quality = self._get_trade_quality(grade)
 
             # Create HarmonicPattern object
             return HarmonicPattern(
@@ -365,10 +411,14 @@ class PatternDetector:
                 target_point_a=target_point_a,
                 risk_reward=risk_reward,
                 prz_levels=prz_levels,
+                d_point_range_min=d_point_range_min,
+                d_point_range_max=d_point_range_max,
                 days_since_completion=0,
-                pattern_quality=pattern_quality,
+                # pattern_quality=pattern_quality,  # REMOVED
                 tolerance_level=tolerance_level,
                 grade=grade,
+                trade_quality=trade_quality,
+                tp_strategy_used=tp_strategy_used,
                 # Multi-swing BC not detected from pyharmonics
                 is_multi_swing_bc=False,
                 bc_internal_swing_count=0,
@@ -378,41 +428,124 @@ class PatternDetector:
 
         except Exception as e:
             # If conversion fails, skip this pattern
-            print(f"Warning: Failed to convert pyharmonics pattern {py_pattern.name}: {e}")
+            print(f"Warning: [{symbol}] Failed to convert pyharmonics pattern {py_pattern.name}: {e}")
             return None
 
-
-    def _assess_pattern_quality(self, ab_xa: float, b_min: float, b_max: float,
-                                bc_proj: float, bc_min: float, bc_max: float) -> str:
+    def _validate_temporal_proportionality(self, x_ts, a_ts, b_ts, c_ts, d_ts) -> tuple:
         """
-        Assess pattern quality based on how precise the ratios are.
+        Validate that pattern legs have proportional time relationships.
+        Filters out patterns where CD leg is disproportionately extended compared to other legs.
 
-        Returns: EXCELLENT, GOOD, or STANDARD
+        This catches patterns like RANI where XABC forms in 6-18 months but CD takes 4+ years,
+        indicating different market phases rather than a cohesive harmonic structure.
+
+        Args:
+            x_ts, a_ts, b_ts, c_ts, d_ts: Timestamps for each point
+
+        Returns:
+            (is_valid, reason): Tuple of boolean and reason string
         """
-        b_midpoint = (b_min + b_max) / 2
-        bc_midpoint = (bc_min + bc_max) / 2
+        # Check if temporal validation is enabled
+        if not (hasattr(config, 'ENABLE_TEMPORAL_VALIDATION') and config.ENABLE_TEMPORAL_VALIDATION):
+            return True, ""
 
-        b_deviation = abs(ab_xa - b_midpoint) / ((b_max - b_min) / 2) if b_max != b_min else 0
-        bc_deviation = abs(bc_proj - bc_midpoint) / ((bc_max - bc_min) / 2) if bc_max != bc_min else 0
+        # Calculate time durations in days
+        xa_time = (a_ts - x_ts).days
+        ab_time = (b_ts - a_ts).days
+        bc_time = (c_ts - b_ts).days
+        cd_time = (d_ts - c_ts).days
+        xabc_time = xa_time + ab_time + bc_time
+        total_time = (d_ts - x_ts).days
 
-        avg_deviation = (b_deviation + bc_deviation) / 2
+        # Avoid division by zero
+        if xa_time <= 0 or ab_time <= 0 or bc_time <= 0:
+            return False, f"Invalid time sequence: XA={xa_time}d, AB={ab_time}d, BC={bc_time}d"
 
-        if avg_deviation < 0.3:
-            return "EXCELLENT"
-        elif avg_deviation < 0.6:
-            return "GOOD"
-        else:
-            return "STANDARD"
+        # Check maximum total pattern duration (prevents 24-year patterns like SHEN!)
+        max_total_duration = config.MAX_TOTAL_PATTERN_DURATION_DAYS if hasattr(config, 'MAX_TOTAL_PATTERN_DURATION_DAYS') else 1825
+        if total_time > max_total_duration:
+            return False, f"Total pattern duration too long: {total_time} days ({total_time/365:.1f} years, max {max_total_duration/365:.1f} years)"
+
+        # Check maximum individual leg duration (prevents 19-year XA legs!)
+        max_leg_duration = config.MAX_INDIVIDUAL_LEG_DURATION_DAYS if hasattr(config, 'MAX_INDIVIDUAL_LEG_DURATION_DAYS') else 1095
+
+        if xa_time > max_leg_duration:
+            return False, f"XA leg too long: {xa_time} days ({xa_time/365:.1f} years, max {max_leg_duration/365:.1f} years)"
+        if ab_time > max_leg_duration:
+            return False, f"AB leg too long: {ab_time} days ({ab_time/365:.1f} years, max {max_leg_duration/365:.1f} years)"
+        if bc_time > max_leg_duration:
+            return False, f"BC leg too long: {bc_time} days ({bc_time/365:.1f} years, max {max_leg_duration/365:.1f} years)"
+        if cd_time > max_leg_duration:
+            return False, f"CD leg too long: {cd_time} days ({cd_time/365:.1f} years, max {max_leg_duration/365:.1f} years)"
+
+        # Calculate time ratios
+        cd_to_xa_ratio = cd_time / xa_time
+        cd_to_ab_ratio = cd_time / ab_time
+        cd_to_bc_ratio = cd_time / bc_time
+        cd_to_xabc_ratio = cd_time / xabc_time if xabc_time > 0 else 0
+
+        # Get thresholds from config (with defaults)
+        max_cd_xa = config.MAX_CD_TO_XA_TIME_RATIO if hasattr(config, 'MAX_CD_TO_XA_TIME_RATIO') else 5.0
+        max_cd_ab = config.MAX_CD_TO_AB_TIME_RATIO if hasattr(config, 'MAX_CD_TO_AB_TIME_RATIO') else 10.0
+        max_cd_bc = config.MAX_CD_TO_BC_TIME_RATIO if hasattr(config, 'MAX_CD_TO_BC_TIME_RATIO') else 8.0
+        max_cd_xabc = config.MAX_CD_TO_XABC_TIME_RATIO if hasattr(config, 'MAX_CD_TO_XABC_TIME_RATIO') else 3.0
+
+        # Check if CD is disproportionately long
+        if cd_to_xa_ratio > max_cd_xa:
+            return False, f"CD leg too extended: {cd_to_xa_ratio:.1f}x longer than XA (max {max_cd_xa}x)"
+
+        if cd_to_ab_ratio > max_cd_ab:
+            return False, f"CD leg too extended: {cd_to_ab_ratio:.1f}x longer than AB (max {max_cd_ab}x)"
+
+        if cd_to_bc_ratio > max_cd_bc:
+            return False, f"CD leg too extended: {cd_to_bc_ratio:.1f}x longer than BC (max {max_cd_bc}x)"
+
+        if cd_to_xabc_ratio > max_cd_xabc:
+            return False, f"CD leg too extended: {cd_to_xabc_ratio:.1f}x longer than XABC combined (max {max_cd_xabc}x)"
+
+        # Pattern passes temporal validation
+        return True, ""
+
+    # REMOVED: _assess_pattern_quality() method - quality classification no longer used
+    # def _assess_pattern_quality(self, ab_xa: float, b_min: float, b_max: float,
+    #                             bc_proj: float, bc_min: float, bc_max: float) -> str:
+    #     """
+    #     Assess pattern quality based on how precise the ratios are.
+    #
+    #     Returns: EXCELLENT, GOOD, or STANDARD
+    #     """
+    #     b_midpoint = (b_min + b_max) / 2
+    #     bc_midpoint = (bc_min + bc_max) / 2
+    #
+    #     b_deviation = abs(ab_xa - b_midpoint) / ((b_max - b_min) / 2) if b_max != b_min else 0
+    #     bc_deviation = abs(bc_proj - bc_midpoint) / ((bc_max - bc_min) / 2) if bc_max != bc_min else 0
+    #
+    #     avg_deviation = (b_deviation + bc_deviation) / 2
+    #
+    #     if avg_deviation < 0.3:
+    #         return "EXCELLENT"
+    #     elif avg_deviation < 0.6:
+    #         return "GOOD"
+    #     else:
+    #         return "STANDARD"
 
 
     def _calculate_pyharmonics_grade(self, ab_xa: float, ad_xa: float, bc_projection: float,
-                                     pattern_spec, fib_tolerance: float) -> str:
+                                     pattern_spec, fib_tolerance: float,
+                                     x_price: float, a_price: float, b_price: float,
+                                     c_price: float, d_price: float,
+                                     x_ts, a_ts, b_ts, c_ts, d_ts) -> str:
         """
-        Calculate granular grade for pyharmonics patterns based on deviation from textbook ideals.
+        Calculate refined harmonic grade emphasizing D-point accuracy, PRZ convergence, and time symmetry.
 
-        For pyharmonics patterns, grade reflects how closely ratios match perfect textbook values:
-        - A+ = Perfect textbook match (0% deviation)
-        - C- = Borderline match (at fib_tolerance limit)
+        Grading Hierarchy (Scott Carney Framework):
+        - D-point (PRZ): 45% weight - MOST CRITICAL for reversal probability
+        - B-point: 35% weight - Pattern structure definition
+        - BC projection: 20% weight - Most flexible leg
+
+        Quality Multipliers:
+        - PRZ Convergence: ±5 points (cluster of AB=CD, BC proj, D-point)
+        - Time Symmetry: ±1 tier (XB vs BD leg duration harmony)
 
         Args:
             ab_xa: Actual AB/XA ratio (B-point)
@@ -420,58 +553,288 @@ class PatternDetector:
             bc_projection: Actual CD/BC ratio (BC projection)
             pattern_spec: PatternSpec with ideal ranges
             fib_tolerance: PYHARMONICS_FIB_TOLERANCE value
+            x_price, a_price, b_price, c_price, d_price: XABCD prices
+            x_ts, a_ts, b_ts, c_ts, d_ts: XABCD timestamps
 
         Returns:
-            Grade from A+ to C- based on deviation from ideal ratios
+            Grade from A+ to C- based on Fibonacci precision and structural quality
         """
-        # Calculate ideal (midpoint) values for each key ratio
-        b_ideal = (pattern_spec.b_point_min + pattern_spec.b_point_max) / 2
-        d_ideal = (pattern_spec.d_point_min + pattern_spec.d_point_max) / 2
-        bc_ideal = (pattern_spec.bc_projection_min + pattern_spec.bc_projection_max) / 2
+        # Step 1: Calculate individual ratio scores (0-100 scale)
+        # Using distance-to-band normalization (NOT fixed percentage)
 
-        # Calculate absolute deviations from ideal
-        b_deviation = abs(ab_xa - b_ideal)
-        d_deviation = abs(ad_xa - d_ideal)
-        bc_deviation = abs(bc_projection - bc_ideal)
+        b_score = self._score_ratio_precision(
+            actual=ab_xa,
+            ideal_min=pattern_spec.b_point_min,
+            ideal_max=pattern_spec.b_point_max
+        )
 
-        # Normalize deviations against fib_tolerance
-        # Deviation = 0 → score = 0 (perfect)
-        # Deviation = fib_tolerance → score = 1.0 (borderline)
-        b_score = min(b_deviation / fib_tolerance, 1.0) if fib_tolerance > 0 else 0
-        d_score = min(d_deviation / fib_tolerance, 1.0) if fib_tolerance > 0 else 0
-        bc_score = min(bc_deviation / fib_tolerance, 1.0) if fib_tolerance > 0 else 0
+        d_score = self._score_ratio_precision(
+            actual=ad_xa,
+            ideal_min=pattern_spec.d_point_min,
+            ideal_max=pattern_spec.d_point_max
+        )
 
-        # Calculate average deviation score (0.0 = perfect, 1.0 = borderline)
-        avg_score = (b_score + d_score + bc_score) / 3
+        bc_score = self._score_ratio_precision(
+            actual=bc_projection,
+            ideal_min=pattern_spec.bc_projection_min,
+            ideal_max=pattern_spec.bc_projection_max
+        )
 
-        # Map score to grade (9 grade levels: A+, A, A-, B+, B, B-, C+, C, C-)
-        # Perfect (0.00-0.05) = A+
-        # Excellent (0.05-0.20) = A
-        # Very Good (0.20-0.35) = A-
-        # Good (0.35-0.50) = B+
-        # Above Average (0.50-0.60) = B
-        # Average (0.60-0.70) = B-
-        # Below Average (0.70-0.80) = C+
-        # Marginal (0.80-0.90) = C
-        # Borderline (0.90-1.00) = C-
-        if avg_score < 0.05:
+        # Step 2: Calculate weighted base score (D-point dominates)
+        # D=45%, B=35%, BC=20%
+        base_score = (d_score * 0.45) + (b_score * 0.35) + (bc_score * 0.20)
+
+        # Step 3: PRZ Convergence Analysis
+        # Check if AB=CD, BC projection, and D-point cluster at same price level
+        prz_adjustment = self._calculate_prz_convergence(
+            x_price, a_price, b_price, c_price, d_price,
+            ad_xa, bc_projection, pattern_spec
+        )
+
+        # Step 4: Time Symmetry Analysis
+        # Evaluate temporal harmony between XB and BD legs
+        time_adjustment = self._calculate_time_symmetry(
+            x_ts, a_ts, b_ts, c_ts, d_ts
+        )
+
+        # Step 5: Calculate final score with adjustments
+        final_score = base_score + prz_adjustment + time_adjustment
+
+        # Clamp to valid range
+        final_score = max(0, min(100, final_score))
+
+        # Step 6: Convert score to letter grade
+        grade = self._score_to_grade(final_score)
+
+        return grade
+
+    def _score_ratio_precision(self, actual: float, ideal_min: float, ideal_max: float) -> float:
+        """
+        Score how precisely a Fibonacci ratio matches its ideal band using distance-to-band normalization.
+
+        This ensures:
+        - Tight ratios (e.g., Gartley D = 0.786) are scored strictly
+        - Wide ratios (e.g., Crab BC = 2.618-3.618) are scored flexibly
+
+        Args:
+            actual: Actual measured ratio
+            ideal_min: Minimum acceptable Fibonacci value
+            ideal_max: Maximum acceptable Fibonacci value
+
+        Returns:
+            Score from 0-100 (100 = perfect, 0 = at/beyond tolerance edge)
+        """
+        # Calculate ideal midpoint
+        ideal_midpoint = (ideal_min + ideal_max) / 2
+
+        # Calculate band width (tolerance range)
+        band_width = ideal_max - ideal_min
+
+        # Handle exact values (zero band width)
+        if band_width < 0.001:
+            # For exact ratios (e.g., Gartley D = 0.786), use stricter scoring
+            deviation = abs(actual - ideal_midpoint)
+            # Use 3% as reference tolerance for exact ratios
+            max_deviation = ideal_midpoint * 0.03
+            normalized_deviation = min(deviation / max_deviation, 1.0) if max_deviation > 0 else 0
+            score = 100 * (1 - normalized_deviation)
+            return max(0, score)
+
+        # Calculate distance from midpoint
+        deviation_from_midpoint = abs(actual - ideal_midpoint)
+
+        # Normalize by half-band width (distance to edge)
+        half_band = band_width / 2
+        normalized_deviation = deviation_from_midpoint / half_band if half_band > 0 else 0
+
+        # Convert to score (0-100)
+        # Perfect midpoint hit = 100
+        # At band edge = 50
+        # Beyond band edge = diminishing score
+        if normalized_deviation <= 1.0:
+            # Within band: linear scoring from 100 (midpoint) to 50 (edge)
+            score = 100 - (normalized_deviation * 50)
+        else:
+            # Outside band: penalty scoring
+            # Beyond edge by 1x band width = 0 score
+            overshoot = normalized_deviation - 1.0
+            score = max(0, 50 - (overshoot * 50))
+
+        return score
+
+    def _calculate_prz_convergence(self, x_price: float, a_price: float, b_price: float,
+                                   c_price: float, d_price: float, ad_xa: float,
+                                   bc_projection: float, pattern_spec) -> float:
+        """
+        Calculate PRZ (Potential Reversal Zone) convergence bonus/penalty.
+
+        The D-point is strongest when multiple Fibonacci levels cluster at the same price:
+        - Primary D ratio (e.g., 0.786 XA for Gartley, 1.618 XA for Crab)
+        - AB=CD completion level
+        - BC projection completion level
+
+        Tight clustering = High reversal probability = Bonus
+        Wide dispersion = Weak PRZ = Penalty
+
+        Args:
+            x_price, a_price, b_price, c_price, d_price: XABCD price levels
+            ad_xa: Actual AD/XA ratio
+            bc_projection: Actual BC projection ratio
+            pattern_spec: Pattern specification
+
+        Returns:
+            Adjustment value: +5 to -5 points
+        """
+        # Calculate three key PRZ levels
+
+        # Level 1: Primary D-point (actual D from pattern)
+        primary_d = d_price
+
+        # Level 2: AB=CD completion
+        # AB=CD means: CD should equal AB in price distance
+        ab_distance = abs(b_price - a_price)
+        if primary_d < c_price:  # Bullish pattern (D below C)
+            abcd_target = c_price - ab_distance
+        else:  # Bearish pattern (D above C)
+            abcd_target = c_price + ab_distance
+
+        # Level 3: BC projection target
+        bc_distance = abs(c_price - b_price)
+        bc_proj_distance = bc_distance * pattern_spec.bc_projection_min  # Use min as reference
+        if primary_d < c_price:  # Bullish
+            bc_proj_target = c_price - bc_proj_distance
+        else:  # Bearish
+            bc_proj_target = c_price + bc_proj_distance
+
+        # Calculate price deviations between the three levels
+        d_to_abcd = abs(primary_d - abcd_target)
+        d_to_bc_proj = abs(primary_d - bc_proj_target)
+        abcd_to_bc_proj = abs(abcd_target - bc_proj_target)
+
+        # Calculate percentage deviations relative to D price
+        avg_d_price = (primary_d + abcd_target + bc_proj_target) / 3
+        if avg_d_price == 0:
+            return 0
+
+        pct_d_to_abcd = (d_to_abcd / avg_d_price) * 100
+        pct_d_to_bc_proj = (d_to_bc_proj / avg_d_price) * 100
+        pct_abcd_to_bc_proj = (abcd_to_bc_proj / avg_d_price) * 100
+
+        # Average percentage deviation across all three comparisons
+        avg_deviation_pct = (pct_d_to_abcd + pct_d_to_bc_proj + pct_abcd_to_bc_proj) / 3
+
+        # Scoring logic:
+        # Excellent clustering: < 0.3% deviation → +5 points (strong reversal zone)
+        # Good clustering: 0.3-0.6% → +3 points
+        # Acceptable: 0.6-1.0% → +1 point
+        # Neutral: 1.0-2.0% → 0 points
+        # Poor: 2.0-3.0% → -2 points
+        # Very poor: > 3.0% → -5 points (dispersed PRZ, weak signal)
+
+        if avg_deviation_pct < 0.3:
+            return 5.0  # Exceptional PRZ cluster
+        elif avg_deviation_pct < 0.6:
+            return 3.0  # Strong cluster
+        elif avg_deviation_pct < 1.0:
+            return 1.0  # Good cluster
+        elif avg_deviation_pct < 2.0:
+            return 0.0  # Neutral
+        elif avg_deviation_pct < 3.0:
+            return -2.0  # Weak PRZ
+        else:
+            return -5.0  # Dispersed PRZ
+
+    def _calculate_time_symmetry(self, x_ts, a_ts, b_ts, c_ts, d_ts) -> float:
+        """
+        Calculate time symmetry adjustment based on XB vs BD leg duration.
+
+        Harmonic patterns require price AND time harmony.
+        Excellent time symmetry improves reversal probability.
+        Broken rhythm suggests weaker structural integrity.
+
+        Args:
+            x_ts, a_ts, b_ts, c_ts, d_ts: XABCD timestamps
+
+        Returns:
+            Adjustment value: +3 to -3 points
+        """
+        # Calculate leg durations
+        xb_duration = (b_ts - x_ts).days
+        bd_duration = (d_ts - b_ts).days
+
+        # Avoid division by zero
+        if xb_duration <= 0 or bd_duration <= 0:
+            return 0
+
+        # Calculate time ratio
+        time_ratio = bd_duration / xb_duration if xb_duration > 0 else 0
+
+        # Scoring based on Fibonacci time ratios:
+        # Perfect symmetry: 0.618-1.618 (golden ratio zone) → +3 points
+        # Good symmetry: 0.5-2.0 → +1 point
+        # Acceptable: 0.382-2.618 → 0 points
+        # Poor: One leg > 2.618x the other → -3 points
+
+        if 0.618 <= time_ratio <= 1.618:
+            # Golden ratio time symmetry
+            return 3.0
+        elif 0.5 <= time_ratio <= 2.0:
+            # Good symmetry
+            return 1.0
+        elif 0.382 <= time_ratio <= 2.618:
+            # Acceptable range
+            return 0.0
+        else:
+            # Broken rhythm - one leg disproportionately long
+            return -3.0
+
+    def _score_to_grade(self, score: float) -> str:
+        """
+        Convert numerical score (0-100) to letter grade.
+
+        Args:
+            score: Final score after all adjustments
+
+        Returns:
+            Letter grade from A+ to C-
+        """
+        if score >= 95:
             return 'A+'
-        elif avg_score < 0.20:
+        elif score >= 90:
             return 'A'
-        elif avg_score < 0.35:
+        elif score >= 85:
             return 'A-'
-        elif avg_score < 0.50:
+        elif score >= 80:
             return 'B+'
-        elif avg_score < 0.60:
+        elif score >= 75:
             return 'B'
-        elif avg_score < 0.70:
+        elif score >= 70:
             return 'B-'
-        elif avg_score < 0.80:
+        elif score >= 65:
             return 'C+'
-        elif avg_score < 0.90:
+        elif score >= 60:
             return 'C'
         else:
             return 'C-'
+
+    def _get_trade_quality(self, grade: str) -> str:
+        """
+        Map letter grade to trade quality classification.
+
+        Args:
+            grade: Letter grade (A+ to C-)
+
+        Returns:
+            Trade quality tier
+        """
+        if grade in ['A+', 'A']:
+            return 'High-Probability Entry'
+        elif grade in ['A-', 'B+', 'B']:
+            return 'Standard Trade'
+        elif grade in ['B-', 'C+']:
+            return 'Standard / Reduced Size'
+        else:  # C, C-
+            return 'Marginal / Scalp Only'
 
     def generate_pattern_chart(self, pattern: HarmonicPattern, ticker: str,
                                df: pd.DataFrame, chart_dir: str, interval: str = '1d',
@@ -745,7 +1108,7 @@ class PatternDetector:
         direction = "BULLISH" if pattern.is_bullish else "BEARISH"
         interval_name = {'1d': 'Daily', '1wk': 'Weekly', '1mo': 'Monthly'}.get(interval, interval.upper())
         title = f"{ticker} - {direction} {pattern.pattern_type.upper()}"
-        subtitle = f"{interval_name} Chart | Grade: {pattern.grade} | Detected: {pattern.d.date.date()} | Risk/Reward: {pattern.risk_reward:.2f}:1"
+        subtitle = f"{interval_name} Chart | Grade: {pattern.grade} | Detected: {pattern.d.date.date()} | R/R: {pattern.risk_reward:.2f}:1"
         ax.set_title(f"{title}\n{subtitle}", fontsize=14, fontweight='bold')
         ax.set_xlabel('Date', fontsize=12)
         ax.set_ylabel('Price ($)', fontsize=12)
@@ -781,11 +1144,24 @@ class PatternDetector:
         # Calculate risk percentage
         risk_pct = abs((pattern.entry_price - pattern.stop_loss) / pattern.entry_price * 100)
 
+        # Determine TP strategy display text
+        tp_strategy_display = ""
+        if hasattr(pattern, 'tp_strategy_used') and pattern.tp_strategy_used:
+            tp_strategy_display = f"\nStrategy: {pattern.tp_strategy_used}"
+
+        # Calculate PRZ range display
+        prz_range_text = ""
+        if pattern.d_point_range_min > 0 and pattern.d_point_range_max > 0:
+            # Calculate the tolerance percentage from entry price
+            range_from_entry = ((pattern.d_point_range_max - pattern.entry_price) / pattern.entry_price) * 100
+            prz_range_text = f"Entry Zone: ${pattern.d_point_range_min:.2f} - ${pattern.d_point_range_max:.2f} (±{range_from_entry:.1f}%)\n"
+
         # Enhanced pattern info box (TOP LEFT)
         info_text = (
             f"TRADING LEVELS\n"
             f"{'─'*20}\n"
             f"Entry: ${pattern.entry_price:.2f}\n"
+            f"{prz_range_text}"
             f"Stop:  ${pattern.stop_loss:.2f}\n"
             f"Risk:  {risk_pct:.1f}%\n"
             f"\n"
@@ -793,11 +1169,10 @@ class PatternDetector:
             f"{'─'*20}\n"
             f"T1: ${pattern.ipo_target_1:.2f}\n"
             f"T2: ${pattern.ipo_target_2:.2f}\n"
-            f"T3: ${pattern.target_point_a:.2f}\n"
+            f"T3: ${pattern.target_point_a:.2f}{tp_strategy_display}\n"
             f"\n"
             f"PATTERN METRICS\n"
             f"{'─'*20}\n"
-            f"Quality:   {pattern.pattern_quality}\n"
             f"Tolerance: {pattern.tolerance_level}\n"
             f"Grade:     {pattern.grade}\n"
         )
@@ -858,7 +1233,7 @@ class PatternDetector:
         return chart_path
 
     def generate_signal(self, pattern: HarmonicPattern, current_price: float,
-                       max_days_old: int = 10, verbose: bool = False) -> Tuple[str, str]:
+                       max_days_old: int = None, verbose: bool = False) -> Tuple[str, str]:
         """
         Generate trading signal based on Carney's exact framework from Volumes 1-3.
 
@@ -871,25 +1246,41 @@ class PatternDetector:
         Args:
             pattern: Detected harmonic pattern
             current_price: Current stock price
-            max_days_old: Maximum age of pattern to consider (days)
+            max_days_old: Maximum age of pattern to consider (days). If None, uses MAX_DAYS_SINCE_PATTERN from config
             verbose: If True, generate detailed asset-specific explanation
 
         Returns:
             Tuple of (signal, explanation)
         """
-        # Check pattern age
+        # Check pattern age - use config value if not specified
+        if max_days_old is None:
+            try:
+                import config
+                max_days_old = config.MAX_DAYS_SINCE_PATTERN if hasattr(config, 'MAX_DAYS_SINCE_PATTERN') else 730
+            except ImportError:
+                max_days_old = 730  # Default to 2 years if config not available
+
         if pattern.days_since_completion > max_days_old:
             return "HOLD", f"Pattern expired ({pattern.days_since_completion} days old, max {max_days_old}) - detected on {pattern.d.date.date()}"
 
-        # Check risk/reward ratio from config
+        # Check risk/reward ratio from config - separate filters for LONG vs SHORT
         try:
             import config
-            min_rr = config.MIN_RISK_REWARD_RATIO if hasattr(config, 'MIN_RISK_REWARD_RATIO') else 1.5
+            # Use different R/R filters based on pattern direction
+            if pattern.is_bullish:
+                # LONG (BUY) patterns - higher R/R potential
+                min_rr = config.MIN_LONG_RISK_REWARD_RATIO if hasattr(config, 'MIN_LONG_RISK_REWARD_RATIO') else 1.5
+                signal_type = "LONG"
+            else:
+                # SHORT (SELL) patterns - lower R/R due to limited downside
+                min_rr = config.MIN_SHORT_RISK_REWARD_RATIO if hasattr(config, 'MIN_SHORT_RISK_REWARD_RATIO') else 1.5
+                signal_type = "SHORT"
         except ImportError:
             min_rr = 1.5
+            signal_type = "LONG" if pattern.is_bullish else "SHORT"
 
         if pattern.risk_reward < min_rr:
-            return "HOLD", f"Risk/Reward too low ({pattern.risk_reward:.2f}:1, minimum {min_rr}:1) - pattern detected on {pattern.d.date.date()}"
+            return "HOLD", f"Risk/Reward too low for {signal_type} ({pattern.risk_reward:.2f}:1, minimum {min_rr}:1) - pattern detected on {pattern.d.date.date()}"
 
         # Check risk percentage from config
         try:
@@ -979,7 +1370,7 @@ class PatternDetector:
                 f"  Entry: ${pattern.entry_price:.2f} | Stop: ${pattern.stop_loss:.2f}\n"
                 f"  T1: ${pattern.ipo_target_1:.2f} | T2: ${pattern.ipo_target_2:.2f} | T3: ${pattern.target_point_a:.2f}\n"
                 f"  Risk/Reward: {pattern.risk_reward:.2f}:1\n"
-                f"  Quality: {pattern.pattern_quality} | Tolerance: {pattern.tolerance_level}"
+                f"  Tolerance: {pattern.tolerance_level}"
             )
 
         return signal, explanation
@@ -1003,7 +1394,7 @@ class PatternDetector:
         # Header
         lines.append(f"{'='*70}")
         lines.append(f"{direction} {pattern.pattern_type.upper()} PATTERN - {signal} SIGNAL")
-        lines.append(f"Grade: {pattern.grade} | Quality: {pattern.pattern_quality} | Tolerance: {pattern.tolerance_level}")
+        lines.append(f"Grade: {pattern.grade} | Tolerance: {pattern.tolerance_level}")
         lines.append(f"{'='*70}")
         lines.append("")
 
@@ -1155,7 +1546,6 @@ class PatternDetector:
             lines.append(f"  ✓ Bullish {pattern.pattern_type} pattern completed at ${pattern.entry_price:.2f}")
             lines.append(f"  ✓ Current price ${current_price:.2f} is within PRZ tolerance")
             lines.append(f"  ✓ Risk/Reward ratio of {pattern.risk_reward:.2f}:1 meets minimum")
-            lines.append(f"  ✓ Pattern quality rated as {pattern.pattern_quality}")
             lines.append(f"  ✓ All Fibonacci ratios validated per Carney's specifications")
             lines.append("")
             lines.append(f"  RECOMMENDATION: Consider buying at current price ${current_price:.2f}")
@@ -1165,7 +1555,6 @@ class PatternDetector:
             lines.append(f"  ✓ Bearish {pattern.pattern_type} pattern completed at ${pattern.entry_price:.2f}")
             lines.append(f"  ✓ Current price ${current_price:.2f} is within PRZ tolerance")
             lines.append(f"  ✓ Risk/Reward ratio of {pattern.risk_reward:.2f}:1 meets minimum")
-            lines.append(f"  ✓ Pattern quality rated as {pattern.pattern_quality}")
             lines.append(f"  ✓ All Fibonacci ratios validated per Carney's specifications")
             lines.append("")
             lines.append(f"  RECOMMENDATION: Consider selling/shorting at current price ${current_price:.2f}")
@@ -1209,7 +1598,7 @@ if __name__ == "__main__":
         current_price = df['close'].iloc[-1]
         signal, explanation = detector.generate_signal(pattern, current_price)
 
-        print(f"Pattern {i}: {pattern.pattern_type.upper()} ({'BULLISH' if pattern.is_bullish else 'BEARISH'}) [{pattern.pattern_quality}]")
+        print(f"Pattern {i}: {pattern.pattern_type.upper()} ({'BULLISH' if pattern.is_bullish else 'BEARISH'}) [Grade {pattern.grade}]")
         print(f"  Points: X=${pattern.x.price:.2f} -> A=${pattern.a.price:.2f} -> B=${pattern.b.price:.2f} -> C=${pattern.c.price:.2f} -> D=${pattern.d.price:.2f}")
         print(f"  Date Range: {pattern.x.date.date()} to {pattern.d.date.date()}")
         print(f"  Ratios: AB/XA={pattern.ab_xa_ratio:.3f}, BC_proj={pattern.bc_projection:.3f}, AD/XA={pattern.ad_xa_ratio:.3f}")

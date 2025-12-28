@@ -34,7 +34,8 @@ class ScottStrategy(TPStrategy):
                          b_price: float,
                          c_price: float,
                          d_price: float,
-                         d_index: int) -> TPTargets:
+                         d_index: int,
+                         ticker: str = None) -> TPTargets:
         """
         Calculate I.P.O. targets using Carney's Fibonacci method.
 
@@ -63,7 +64,8 @@ class ScottStrategy(TPStrategy):
             primary=primary,
             secondary=secondary,
             final=final,
-            description=description
+            description=description,
+            tp_strategy_used="Fibonacci"
         )
 
     def get_strategy_name(self) -> str:

@@ -55,7 +55,8 @@ class PositionStrategy(TPStrategy):
                          b_price: float,
                          c_price: float,
                          d_price: float,
-                         d_index: int) -> TPTargets:
+                         d_index: int,
+                         ticker: str = None) -> TPTargets:
         """
         Calculate long-term position targets using Fibonacci extensions
         and major external market structure levels.
@@ -68,7 +69,7 @@ class PositionStrategy(TPStrategy):
         # Get Mitch's external structure targets for context
         mitch_targets = self.mitch_strategy.calculate_targets(
             pattern_high, pattern_low, is_bullish, price_data,
-            x_price, a_price, b_price, c_price, d_price, d_index
+            x_price, a_price, b_price, c_price, d_price, d_index, ticker
         )
 
         # Get ALL historical data for major structure analysis (entire stock history)
@@ -178,7 +179,8 @@ class PositionStrategy(TPStrategy):
             primary=primary,
             secondary=secondary,
             final=final,
-            description=desc
+            description=desc,
+            tp_strategy_used=mitch_targets.tp_strategy_used if hasattr(mitch_targets, 'tp_strategy_used') and mitch_targets.tp_strategy_used else "Combined"
         )
 
     def _calculate_bearish_position_targets(self,
@@ -261,7 +263,8 @@ class PositionStrategy(TPStrategy):
             primary=primary,
             secondary=secondary,
             final=final,
-            description=desc
+            description=desc,
+            tp_strategy_used=mitch_targets.tp_strategy_used if hasattr(mitch_targets, 'tp_strategy_used') and mitch_targets.tp_strategy_used else "Combined"
         )
 
     def _find_major_levels(self, data: pd.DataFrame, is_high: bool, count: int = 3) -> List[float]:

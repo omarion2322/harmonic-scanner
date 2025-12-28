@@ -13,7 +13,7 @@ Edit these settings to customize the scanner behavior without modifying the main
 DATA_INTERVAL = '1wk'  # <<< CHANGE THIS TO SELECT YOUR TIMEFRAME
 
 # Import timeframe-specific optimized configurations
-from config_timeframes import get_timeframe_config
+from .config_timeframes import get_timeframe_config
 
 # Load optimized settings for selected timeframe
 _TIMEFRAME_CONFIG = get_timeframe_config(DATA_INTERVAL)
@@ -24,15 +24,6 @@ _TIMEFRAME_CONFIG = get_timeframe_config(DATA_INTERVAL)
 
 # These values are automatically set based on DATA_INTERVAL above
 # You can override them manually if needed, but the defaults are optimized
-
-# Pattern Detection Engine Selection
-# When True: Uses pyharmonics' HarmonicSearch to find and validate patterns
-#   - Matrix-based detection with built-in Fibonacci validation
-#   - Current algorithm adds: Carney trading specs, stop loss, targets, charting
-# When False: Uses custom algorithm for complete pattern detection and validation
-#   - Forward-search XABC → find D in PRZ
-#   - Carney-specific validation rules and trading specs
-USE_PYHARMONICS_HARMONIC_SEARCH = True
 
 # Fibonacci tolerance for pyharmonics (only when USE_PYHARMONICS_HARMONIC_SEARCH = True)
 # Controls pattern matching precision: 0.03 = 3% tolerance, 0.05 = 5% (more lenient)
@@ -46,47 +37,36 @@ SWING_WINDOW = _TIMEFRAME_CONFIG['SWING_WINDOW']
 # Relevant only if using custom detection algorithm (USE_PYHARMONICS_HARMONIC_SEARCH = False)
 MAX_DAYS_SINCE_PATTERN = _TIMEFRAME_CONFIG['MAX_DAYS_SINCE_PATTERN']
 
-# Maximum swing points to search ahead for pattern D completion
-# This controls how far ahead the detector looks for the D point after finding XABC
-# Higher values allow detection of longer-duration patterns
-# Relevant only if using custom detection algorithm (USE_PYHARMONICS_HARMONIC_SEARCH = False)
-# Timeframe-specific: Daily=10, 3-Day=20, Weekly=100, Monthly=150
-MAX_SEARCH_SWING_POINTS = _TIMEFRAME_CONFIG.get('MAX_SEARCH_SWING_POINTS', 10)
-
-# Maximum gap (intervening swings) allowed between XABC points
-# Controls how stretched out the XABC structure can be
-# 0 = XABC must be consecutive (tight patterns)
-# 3 = Allow up to 3 swings between each XABC point (longer patterns)
-# This respects Carney's framework: still requires alternating peaks/troughs and precise Fibonacci ratios
-# Relevant only if using custom detection algorithm (USE_PYHARMONICS_HARMONIC_SEARCH = False)
-# Timeframe-specific: Daily=0, 3-Day=1, Weekly=3, Monthly=5
-MAX_XABC_SWING_GAP = _TIMEFRAME_CONFIG.get('MAX_XABC_SWING_GAP', 0)
 
 # ============================================================================
-# ADVANCED SWING DETECTION SETTINGS FOR CUSTOM HARMONIC SEARCH
+# PATTERN DURATION FILTERS
 # ============================================================================
 
-# Enable Micro-Swing Mode (2-bar minimum swing detection)
-# When enabled, allows price swings formed by as little as 2 bars for
-# Standard and Relaxed tolerance modes (Textbook always uses standard detection)
-# Expected pattern increase: +35-60% with micro-swing mode
-ENABLE_MICRO_SWING_MODE = False
+# Reject patterns with unrealistic timeframes (e.g., 24-year patterns spanning multiple market cycles)
+# Filters out invalid patterns like SHEN (1999-2023) or RANI (multi-year CD legs)
 
-# Enable Multi-Swing BC Leg Detection
-# When enabled, allows BC leg to contain 2-8 internal micro-swings while still
-# measuring BC as a single macro retracement from B to C
-# Internal swings must be ≥0.236 of BC leg magnitude
-# Validates that C remains terminal extreme and doesn't violate X
-ENABLE_MULTI_SWING_BC = False
+# Maximum ratio of CD duration to XA duration (CD can't be more than Nx longer than XA)
+MAX_CD_TO_XA_TIME_RATIO = 5.0
 
-# Minimum internal swing magnitude (as fraction of BC leg)
-# Internal swings below this magnitude will be filtered out
-# Default: 0.236 (23.6% Fibonacci ratio)
-MULTI_SWING_BC_MIN_MAGNITUDE = 0.236
+# Maximum ratio of CD duration to AB duration
+MAX_CD_TO_AB_TIME_RATIO = 10.0
 
-# Multi-swing BC limits (2-8 internal swings)
-MULTI_SWING_BC_MIN_COUNT = 2
-MULTI_SWING_BC_MAX_COUNT = 8
+# Maximum ratio of CD duration to BC duration
+MAX_CD_TO_BC_TIME_RATIO = 8.0
+
+# Maximum ratio of CD duration to combined XABC duration
+MAX_CD_TO_XABC_TIME_RATIO = 4.0  # Relaxed from 3.0 to allow valid extended CD legs
+
+# Maximum total pattern duration (X to D) in days
+# Weekly: 7 years max (relaxed from 5), Daily: 2 years max, Monthly: 10 years max
+MAX_TOTAL_PATTERN_DURATION_DAYS = 2555  # 7 years for weekly timeframe
+
+# Maximum individual leg duration in days (prevents 19-year XA legs!)
+# No single leg should span more than this
+MAX_INDIVIDUAL_LEG_DURATION_DAYS = 1460  # 4 years max (relaxed from 3 years)
+
+# Enable/disable pattern duration filters (set to False to allow patterns of any length)
+ENABLE_TEMPORAL_VALIDATION = True
 
 # ============================================================================
 # DATA SETTINGS (Auto-loaded from timeframe config)
@@ -116,12 +96,26 @@ STOCK_TICKERS = ['ONDS', 'RIVN', 'TIC', 'IQ', 'PANW', 'DOCU', 'LAC', 'URA', 'FRS
 # Set to True to include all leading ETFs (135 total), False to skip ETFs
 SCAN_ETFS = True
 
+# Commodity universe to scan
+# Set to True to include major commodity futures, False to skip commodities
+SCAN_COMMODITIES = True
+
 CRYPTOS_TO_SCAN = 'Top100'  # Options: 'Top100', 'Top50', 'Top20', or None
 
-# Minimum average daily volume in USD (applies to 'All' Nasdaq mode only)
+# Volume filtering mode (applies to 'All' Nasdaq mode only)
+# If True: Filter by share volume (MIN_VOLUME_STOCKS)
+# If False: Filter by dollar volume (MIN_VOLUME_USD)
+FILTER_BY_STOCK_VOLUME = False
+
+# Minimum average daily DOLLAR volume (used when FILTER_BY_STOCK_VOLUME = False)
 # Filters stocks to ensure liquidity for harmonic pattern trading
-# Default: $1,000,000 USD average daily dollar volume
+# Default: $1,000,000 USD average daily dollar volume (price × shares)
 MIN_VOLUME_USD = 1_000_000
+
+# Minimum average daily SHARE volume (used when FILTER_BY_STOCK_VOLUME = True)
+# Filters stocks by number of shares traded, regardless of price
+# Default: 1,000,000 shares average daily volume
+MIN_VOLUME_STOCKS = 1_000_000
 
 # Maximum number of stocks to scan (None = all from selected universe)
 # Use a smaller number for testing (e.g., 50)
@@ -129,8 +123,14 @@ MAX_STOCKS_TO_SCAN = 10000  # Set to 50 for testing
 
 # Add delay between stock downloads to avoid rate limiting
 # In seconds (0.1 = 100ms, 0.5 = 500ms)
-# Increase if you get rate limit errors
-DOWNLOAD_DELAY = 0.0
+# Recommended: 0.2-0.3s to avoid rate limiting (adds ~6-10 min for 1800 stocks)
+# Set to 0.0 for fastest scanning (risk of rate limits on large batches)
+DOWNLOAD_DELAY = 0.25
+
+# Maximum number of retry attempts for failed downloads
+# Uses exponential backoff: 1s, 2s, 4s delays between retries
+# Recommended: 3 retries (handles temporary network issues and rate limits)
+MAX_DOWNLOAD_RETRIES = 3
 
 
 # ============================================================================
@@ -159,7 +159,7 @@ VOLUME_MULTIPLIER = 1.5
 # When True: Shows up to 50 HOLD signals with reasons
 # When False: Only counts HOLD signals in summary
 # Note: HOLD reasons are always generated in verbose mode
-INCLUDE_HOLD_IN_REPORT = True
+INCLUDE_HOLD_IN_REPORT = False
 
 # Verbose mode: Generate detailed asset-specific explanations
 # When True, reports include detailed analysis for each stock explaining
@@ -184,32 +184,42 @@ CHART_SAVE_DIR = './charts'
 # RISK MANAGEMENT SETTINGS (Auto-loaded from timeframe config)
 # ============================================================================
 
-# Minimum risk percentage (minimum acceptable stop loss distance)
-# Stop losses tighter than this will be rejected as too risky (prone to noise)
-# Auto-adjusted based on timeframe:
-#   Daily: 3% min (avoid noise in active trading)
-#   3-day: 2.5% min (slightly tighter)
-#   Weekly: 5% min (avoid weekly volatility noise)
-#   Monthly: 8% min (avoid monthly volatility noise)
 MIN_ALLOWED_STOP_LOSS_PCT = _TIMEFRAME_CONFIG['MIN_ALLOWED_STOP_LOSS_PCT']
 
-# Maximum risk percentage filter (distance from entry to stop loss)
-# Patterns with risk > this percentage will be filtered out as HOLD
-# This preserves market structure but filters excessively risky trades
-# Auto-adjusted based on timeframe:
-#   Daily: 10% max (tight stops for active trading)
-#   3-day: 7% max (slightly wider)
-#   Weekly: 10% max (medium stops for swing trading)
-#   Monthly: 20% max (wider stops for position trading)
 MAX_ALLOWED_STOP_LOSS_PCT = _TIMEFRAME_CONFIG['MAX_ALLOWED_STOP_LOSS_PCT']
 
-# Minimum risk/reward ratio to generate BUY/SELL signal
-# Auto-adjusted based on timeframe:
-#   Daily: 2.0:1 (higher standard for active trading)
-#   3-day: 1.8:1 (slightly relaxed)
-#   Weekly: 1.5:1 (standard Carney minimum)
-#   Monthly: 1.5:1 (standard Carney minimum)
-MIN_RISK_REWARD_RATIO = _TIMEFRAME_CONFIG['MIN_RISK_REWARD_RATIO']
+# Separate R/R filters for LONG (BUY) and SHORT (SELL) trades
+# LONG trades typically have higher R/R potential due to unlimited upside
+# SHORT trades have lower R/R due to limited downside (price can't go below 0)
+MIN_LONG_RISK_REWARD_RATIO = _TIMEFRAME_CONFIG['MIN_LONG_RISK_REWARD_RATIO']
+MIN_SHORT_RISK_REWARD_RATIO = _TIMEFRAME_CONFIG['MIN_SHORT_RISK_REWARD_RATIO']
+
+# Deprecated: Use MIN_LONG_RISK_REWARD_RATIO or MIN_SHORT_RISK_REWARD_RATIO instead
+MIN_RISK_REWARD_RATIO = MIN_LONG_RISK_REWARD_RATIO  # Backward compatibility
+
+# Maximum pattern age to include in signals (in days)
+# Filters out very old patterns that may no longer be relevant for trading
+# Long-term harmonic patterns should still be recent enough to be actionable
+# Default: 730 days (2 years) - focuses on patterns with recent market structure
+MAX_PATTERN_AGE_DAYS = 1850
+
+# ============================================================================
+# POSITION SIZING SETTINGS
+# ============================================================================
+# Position sizing for partial exits at T1, T2, T3
+# These percentages must sum to 1.0 (100%)
+# Based on deep dive analysis showing:
+#   - T1 hitting 66.7% of LONG trades (take more profit early)
+#   - T2 hitting 40.7% of LONG trades (median move)
+#   - T3 hitting 27.8% of LONG trades (reduced allocation)
+
+POSITION_SIZE_T1 = 0.20  # 20% exit at Target 1
+POSITION_SIZE_T2 = 0.30  # 30% exit at Target 2
+POSITION_SIZE_T3 = 0.50  # 50% exit at Target 3
+
+# Verify position sizing sums to 100%
+assert abs(POSITION_SIZE_T1 + POSITION_SIZE_T2 + POSITION_SIZE_T3 - 1.0) < 0.001, \
+    "Position sizing must sum to 100%"
 
 # ============================================================================
 # TAKE PROFIT STRATEGY SETTINGS
@@ -241,19 +251,23 @@ TP_STRATEGY = 'MITCH'  # <<< CHANGE THIS TO SELECT YOUR TAKE PROFIT STRATEGY
 
 def get_stock_list() -> list:
     """
-    Get list of stocks and ETFs to scan based on STOCKS_TO_SCAN and ETFS_TO_SCAN settings.
+    Get list of stocks, ETFs, and commodities to scan based on configuration settings.
 
     Returns:
         List of ticker symbols
     """
-    from stock_universe import get_stock_universe
+    from data.stock_universe import get_stock_universe
 
     return get_stock_universe(
         stocks_to_scan=STOCKS_TO_SCAN,
         etfs_to_scan=SCAN_ETFS,
+        commodities_to_scan=SCAN_COMMODITIES,
         max_stocks=MAX_STOCKS_TO_SCAN,
         min_volume_usd=MIN_VOLUME_USD,
-        download_delay=DOWNLOAD_DELAY
+        min_volume_stocks=MIN_VOLUME_STOCKS,
+        filter_by_stock_volume=FILTER_BY_STOCK_VOLUME,
+        download_delay=DOWNLOAD_DELAY,
+        timeframe = DATA_INTERVAL
     )
 
 
@@ -273,22 +287,8 @@ def get_settings_summary():
     print(f"  Trading Style: {_TIMEFRAME_CONFIG.get('TIMEFRAME_NOTES', 'N/A')}")
     print()
     print("PATTERN DETECTION (Optimized for timeframe):")
-    detection_engine = "pyharmonics HarmonicSearch" if USE_PYHARMONICS_HARMONIC_SEARCH else "Custom XABC→D Search"
-    print(f"  Detection Engine: {detection_engine}")
-    if USE_PYHARMONICS_HARMONIC_SEARCH:
-        print(f"    Fib Tolerance: {PYHARMONICS_FIB_TOLERANCE*100:.1f}%")
-        print(f"    Grading: A+ (perfect textbook) to C- (borderline at tolerance limit)")
-    else:
-        print(f"    Tolerance Levels: Textbook/Standard/Relaxed")
     print(f"  Swing Window: {SWING_WINDOW}")
     print(f"  Max Days Since Pattern: {MAX_DAYS_SINCE_PATTERN} days")
-    print()
-    print("SWING DETECTION (Advanced Features):")
-    print(f"  Micro-Swing Mode: {'Enabled' if ENABLE_MICRO_SWING_MODE else 'Disabled'} (2-bar minimum)")
-    print(f"  Multi-Swing BC: {'Enabled' if ENABLE_MULTI_SWING_BC else 'Disabled'}")
-    if ENABLE_MULTI_SWING_BC:
-        print(f"    Min magnitude: {MULTI_SWING_BC_MIN_MAGNITUDE:.3f} of BC leg")
-        print(f"    Internal swing range: {MULTI_SWING_BC_MIN_COUNT}-{MULTI_SWING_BC_MAX_COUNT} swings")
     print()
     print("DATA SETTINGS:")
     print(f"  Data Period: {DATA_PERIOD}")
@@ -296,13 +296,22 @@ def get_settings_summary():
     print()
     print("RISK MANAGEMENT (Optimized for timeframe):")
     print(f"  Stop Loss Range: {MIN_ALLOWED_STOP_LOSS_PCT}% - {MAX_ALLOWED_STOP_LOSS_PCT}%")
-    print(f"  Min Risk/Reward Ratio: {MIN_RISK_REWARD_RATIO}:1")
+    print(f"  Min R/R - LONG (BUY):  {MIN_LONG_RISK_REWARD_RATIO}:1")
+    print(f"  Min R/R - SHORT (SELL): {MIN_SHORT_RISK_REWARD_RATIO}:1")
+    print()
+    print("POSITION SIZING:")
+    print(f"  T1 Exit: {POSITION_SIZE_T1*100:.0f}%")
+    print(f"  T2 Exit: {POSITION_SIZE_T2*100:.0f}%")
+    print(f"  T3 Exit: {POSITION_SIZE_T3*100:.0f}%")
     print()
     print("SCANNING SETTINGS:")
     # Stock Universe
     if STOCKS_TO_SCAN and STOCKS_TO_SCAN.upper() != 'NONE':
         if STOCKS_TO_SCAN.upper() == 'ALL':
-            stock_desc = f"All Nasdaq stocks (volume > ${MIN_VOLUME_USD:,} USD)"
+            if FILTER_BY_STOCK_VOLUME:
+                stock_desc = f"All Nasdaq stocks (volume > {MIN_VOLUME_STOCKS:,} shares)"
+            else:
+                stock_desc = f"All Nasdaq stocks (volume > ${MIN_VOLUME_USD:,} USD)"
         elif STOCKS_TO_SCAN.upper() == 'SP500':
             stock_desc = "S&P 500 stocks"
         else:
@@ -317,8 +326,17 @@ def get_settings_summary():
     else:
         print(f"  ETF Universe: Disabled")
 
+    # Commodity Universe
+    if SCAN_COMMODITIES:
+        print(f"  Commodity Universe: All major commodity futures (~25 total)")
+    else:
+        print(f"  Commodity Universe: Disabled")
+
     if STOCKS_TO_SCAN and STOCKS_TO_SCAN.upper() == 'ALL':
-        print(f"  Min Volume Filter: ${MIN_VOLUME_USD:,} USD avg daily")
+        if FILTER_BY_STOCK_VOLUME:
+            print(f"  Min Volume Filter: {MIN_VOLUME_STOCKS:,} shares avg daily (SHARE volume mode)")
+        else:
+            print(f"  Min Volume Filter: ${MIN_VOLUME_USD:,} USD avg daily (DOLLAR volume mode)")
     print(f"  Max Tickers to Scan: {MAX_STOCKS_TO_SCAN if MAX_STOCKS_TO_SCAN else 'All from universe'}")
     print(f"  Download Delay: {DOWNLOAD_DELAY}s")
     print()
