@@ -18,6 +18,7 @@ import time
 
 from pattern_detector import PatternDetector
 from reaction_detector import ReactionDetector
+from data_downloader import download_stock_data
 from pattern_tracker import PatternTracker, PatternStatus
 
 warnings.filterwarnings('ignore')
@@ -136,20 +137,30 @@ class HarmonicScanner:
             verbose = config.VERBOSE_REPORTS if hasattr(config, 'VERBOSE_REPORTS') else False
 
         try:
-            # Download data using config settings
-            stock = yf.Ticker(ticker)
+            # Download data using config settings with retry logic
             data_interval = config.DATA_INTERVAL if hasattr(config, 'DATA_INTERVAL') else '1d'
 
-            # For MITCH strategy, download full history to find support/resistance from entire stock history
-            # For other strategies, use configured DATA_PERIOD
-            tp_strategy = config.TP_STRATEGY if hasattr(config, 'TP_STRATEGY') else 'SCOTT'
-            if tp_strategy == 'MITCH':
-                data_period = 'max'  # Full history for comprehensive S/R analysis
-            else:
-                data_period = config.DATA_PERIOD if hasattr(config, 'DATA_PERIOD') else '6mo'
+            # Always use DATA_PERIOD for pattern detection (performance optimization)
+            # For MITCH strategy with scoring engine, we'll download max history separately for S/R analysis
+            data_period = config.DATA_PERIOD if hasattr(config, 'DATA_PERIOD') else '6mo'
+
+            # Get retry configuration
+            max_retries = config.MAX_DOWNLOAD_RETRIES if hasattr(config, 'MAX_DOWNLOAD_RETRIES') else 3
+            download_delay = config.DOWNLOAD_DELAY if hasattr(config, 'DOWNLOAD_DELAY') else 0.1
 
             # Use auto_adjust=False to get actual NYSE trading prices (not dividend-adjusted)
-            df = stock.history(period=data_period, interval=data_interval, auto_adjust=False)
+            # download_stock_data includes retry logic with exponential backoff
+            df = download_stock_data(
+                ticker=ticker,
+                period=data_period,
+                interval=data_interval,
+                auto_adjust=False,
+                max_retries=max_retries
+            )
+
+            # Apply rate limiting delay
+            if download_delay > 0:
+                time.sleep(download_delay)
 
             if df.empty or len(df) < 50:
                 interval_name = {'1d': 'days', '1wk': 'weeks', '1mo': 'months'}.get(data_interval, 'bars')
@@ -315,14 +326,21 @@ class HarmonicScanner:
             # Update pattern tracker with completed AND forming patterns
             # Get price data for tracking and forming pattern detection
             try:
-                import yfinance as yf
                 from pyharmonics import OHLCTechnicals as Technicals
                 from pyharmonics.search import HarmonicSearch
 
-                stock = yf.Ticker(ticker)
+                # Download with retry logic (same as main download)
                 data_interval = config.DATA_INTERVAL if hasattr(config, 'DATA_INTERVAL') else '1wk'
                 data_period = config.DATA_PERIOD if hasattr(config, 'DATA_PERIOD') else '2y'
-                df = stock.history(period=data_period, interval=data_interval, auto_adjust=False)
+                max_retries = config.MAX_DOWNLOAD_RETRIES if hasattr(config, 'MAX_DOWNLOAD_RETRIES') else 3
+
+                df = download_stock_data(
+                    ticker=ticker,
+                    period=data_period,
+                    interval=data_interval,
+                    auto_adjust=False,
+                    max_retries=max_retries
+                )
 
                 if not df.empty and len(df) >= 50:
                     df.columns = [c.lower() for c in df.columns]
@@ -457,6 +475,12 @@ class HarmonicScanner:
                     report_lines.append("")
                     report_lines.append(f"  Pattern: {pattern.pattern_type.upper()} ({'BULLISH' if pattern.is_bullish else 'BEARISH'})")
                     report_lines.append(f"  Grade: {pattern.grade} | Tolerance: {pattern.tolerance_level}")
+
+                    # Show D-point range (PRZ zone)
+                    if hasattr(pattern, 'd_point_range_min') and pattern.d_point_range_min > 0:
+                        range_from_entry = ((pattern.d_point_range_max - pattern.entry_price) / pattern.entry_price) * 100
+                        report_lines.append(f"  Entry Zone (PRZ): ${pattern.d_point_range_min:.2f} - ${pattern.d_point_range_max:.2f} (±{range_from_entry:.1f}%)")
+
                     report_lines.append(f"  Entry: ${pattern.entry_price:.2f}")
                     report_lines.append(f"  Stop Loss: ${pattern.stop_loss:.2f}")
                     report_lines.append(f"  Target 1: ${pattern.ipo_target_1:.2f}")
@@ -528,6 +552,12 @@ class HarmonicScanner:
                     report_lines.append("")
                     report_lines.append(f"  Pattern: {pattern.pattern_type.upper()} ({'BULLISH' if pattern.is_bullish else 'BEARISH'})")
                     report_lines.append(f"  Grade: {pattern.grade} | Tolerance: {pattern.tolerance_level}")
+
+                    # Show D-point range (PRZ zone)
+                    if hasattr(pattern, 'd_point_range_min') and pattern.d_point_range_min > 0:
+                        range_from_entry = ((pattern.d_point_range_max - pattern.entry_price) / pattern.entry_price) * 100
+                        report_lines.append(f"  Entry Zone (PRZ): ${pattern.d_point_range_min:.2f} - ${pattern.d_point_range_max:.2f} (±{range_from_entry:.1f}%)")
+
                     report_lines.append(f"  Entry: ${pattern.entry_price:.2f}")
                     report_lines.append(f"  Stop Loss: ${pattern.stop_loss:.2f}")
                     report_lines.append(f"  Target 1: ${pattern.ipo_target_1:.2f}")
@@ -634,15 +664,27 @@ class HarmonicScanner:
                     report_lines.append(f"Completion: {pattern.completion_percentage*100:.1f}%")
                     report_lines.append(f"Grade: {pattern.grade} | R/R: {pattern.risk_reward:.2f}:1")
 
-                    # Calculate D-point range (PRZ zone)
-                    # D point is the entry price, and we show a range around it
-                    d_target = pattern.entry_price
-                    tolerance_pct = 0.02  # 2% tolerance for PRZ
-                    d_low = d_target * (1 - tolerance_pct)
-                    d_high = d_target * (1 + tolerance_pct)
+                    # Show D-point range (PRZ zone) from pattern tracker
+                    if hasattr(pattern, 'd_point_range_min') and pattern.d_point_range_min > 0:
+                        range_from_entry = ((pattern.d_point_range_max - pattern.entry_price) / pattern.entry_price) * 100
+                        report_lines.append(f"Entry Zone (PRZ): ${pattern.d_point_range_min:.2f} - ${pattern.d_point_range_max:.2f} (±{range_from_entry:.1f}%)")
+                    else:
+                        # Fallback if d_point_range not set (old patterns)
+                        d_target = pattern.entry_price
+                        tolerance_pct = 0.02  # 2% tolerance for PRZ
+                        d_low = d_target * (1 - tolerance_pct)
+                        d_high = d_target * (1 + tolerance_pct)
+                        report_lines.append(f"Entry Zone (PRZ): ${d_low:.2f} - ${d_high:.2f}")
 
-                    report_lines.append(f"D-Point Range: ${d_low:.2f} - ${d_high:.2f} (Target: ${d_target:.2f})")
-                    report_lines.append(f"Projected Entry: ${pattern.entry_price:.2f} | Projected Stop: ${pattern.stop_loss:.2f}")
+                    # Show entry locking status
+                    if hasattr(pattern, 'entry_locked') and pattern.entry_locked:
+                        report_lines.append(f"Original Entry: ${pattern.original_entry_price:.2f} (LOCKED)")
+                        if pattern.entry_price != pattern.original_entry_price:
+                            report_lines.append(f"Current D-Point: ${pattern.entry_price:.2f} (moved {abs(pattern.entry_price - pattern.original_entry_price):.2f})")
+                    else:
+                        report_lines.append(f"Projected Entry: ${pattern.entry_price:.2f}")
+
+                    report_lines.append(f"Projected Stop: ${pattern.stop_loss:.2f}")
                     report_lines.append(f"Days Monitored: {pattern.days_monitored}")
                     report_lines.append("-"*80)
                     report_lines.append("")

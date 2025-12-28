@@ -89,11 +89,42 @@ class MitchStrategy(TPStrategy):
         2. Measured moves from recent price swings
         3. Key moving average levels (20, 50, 200 SMA)
 
-        Uses ALL available historical data up to point D to find the most
-        meaningful support/resistance levels across the entire stock history.
+        For scoring engine: Downloads full stock history for comprehensive S/R analysis
+        For pattern detection: Uses provided price_data (limited by DATA_PERIOD)
         """
-        # Use ALL historical data up to point D for maximum context
-        historical_data = price_data.iloc[:d_index + 1].copy()
+        # If using scoring engine, download full history for S/R analysis
+        if self.use_tp_scoring_engine and ticker:
+            try:
+                import yfinance as yf
+                import config
+
+                # Download full history for comprehensive S/R analysis
+                stock = yf.Ticker(ticker)
+                data_interval = config.DATA_INTERVAL if hasattr(config, 'DATA_INTERVAL') else '1d'
+                full_history = stock.history(period='max', interval=data_interval, auto_adjust=False)
+
+                if not full_history.empty and len(full_history) > len(price_data):
+                    # Normalize columns to lowercase
+                    full_history.columns = [c.lower() for c in full_history.columns]
+
+                    # Find d_index in the full history (match by date)
+                    d_date = price_data.index[d_index]
+                    try:
+                        full_d_index = full_history.index.get_loc(full_history.index[full_history.index >= d_date][0])
+                        historical_data = full_history.iloc[:full_d_index + 1].copy()
+                    except (IndexError, KeyError):
+                        # If date matching fails, use provided price_data
+                        historical_data = price_data.iloc[:d_index + 1].copy()
+                else:
+                    # If download failed or got less data, use provided price_data
+                    historical_data = price_data.iloc[:d_index + 1].copy()
+            except Exception as e:
+                # If any error, fallback to provided price_data
+                print(f"Warning: [{ticker}] Could not download full history for S/R: {e}")
+                historical_data = price_data.iloc[:d_index + 1].copy()
+        else:
+            # Use provided price_data for pattern detection
+            historical_data = price_data.iloc[:d_index + 1].copy()
 
         if len(historical_data) < 20:
             # Not enough data, fallback to simple pattern-based targets
@@ -245,6 +276,45 @@ class MitchStrategy(TPStrategy):
                                    historical_data: pd.DataFrame,
                                    ticker: str = None) -> TPTargets:
         """Calculate targets for bearish patterns using external structure."""
+
+        # CHECK IF TP SCORING ENGINE IS ENABLED
+        if self.use_tp_scoring_engine:
+            try:
+                # Initialize TP Scoring Engine with historical data
+                engine = self.TPScoringEngine(historical_data.copy(), atr_period=14)
+
+                # Get optimal targets using the scoring engine for SHORT trades
+                tp1, tp2, tp3 = engine.get_optimal_targets(
+                    entry_price=d_price,
+                    direction="SHORT",  # CRITICAL: Use SHORT for bearish patterns
+                    harmonic_targets=None,  # Could pass pattern projections for alignment
+                    min_spacing_pct=self.tp_min_spacing_pct
+                )
+
+                if tp1 is not None:
+                    # Calculate percentages for description
+                    tp1_pct = ((d_price - tp1) / d_price) * 100
+                    tp2_pct = ((d_price - tp2) / d_price) * 100
+                    tp3_pct = ((d_price - tp3) / d_price) * 100
+
+                    desc = f"Mitch Ray (TP Engine): T1 @ {tp1:.2f} (-{tp1_pct:.0f}%), T2 @ {tp2:.2f} (-{tp2_pct:.0f}%), T3 @ {tp3:.2f} (-{tp3_pct:.0f}%)"
+
+                    return TPTargets(
+                        primary=tp1,
+                        secondary=tp2,
+                        final=tp3,
+                        description=desc,
+                        tp_strategy_used="Scoring Engine"
+                    )
+                else:
+                    ticker_info = f"[{ticker}] " if ticker else ""
+                    print(f"Warning: {ticker_info}TP Scoring Engine found no valid zones for SHORT, falling back to standard method")
+            except Exception as e:
+                ticker_info = f"[{ticker}] " if ticker else ""
+                print(f"Warning: {ticker_info}TP Scoring Engine failed for SHORT: {e}")
+                print(f"{ticker_info}Falling back to standard Mitch strategy")
+
+        # STANDARD METHOD: Fixed percentages from analysis
         # DATA-DRIVEN OPTIMIZATION from actual trade analysis (29 SHORT trades, Grade B-+, R/R 3+)
         # Actual median max move: 47.7%, average: 47.0%
         # Current targets were fairly good (T1@39%, T2@52%, T3@66%) but can be optimized

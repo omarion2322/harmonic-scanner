@@ -238,6 +238,7 @@ def filter_by_volume(tickers: List[str], min_volume_usd: float = 1_000_000,
 
 def get_stock_universe(stocks_to_scan: str = 'SP500',
                        etfs_to_scan: bool = False,
+                       commodities_to_scan: bool = False,
                        max_stocks: int = None,
                        min_volume_usd: float = 1_000_000,
                        min_volume_stocks: float = 1_000_000,
@@ -245,11 +246,12 @@ def get_stock_universe(stocks_to_scan: str = 'SP500',
                        download_delay: float = 0.1,
                        timeframe: str = '1d') -> List[str]:
     """
-    Get list of stocks and ETFs to scan based on configuration.
+    Get list of stocks, ETFs, and commodities to scan based on configuration.
 
     Args:
         stocks_to_scan: Stock universe selection - 'All', 'SP500', or 'None'
         etfs_to_scan: Whether to include ETFs (True/False)
+        commodities_to_scan: Whether to include commodity futures (True/False)
         max_stocks: Maximum number of stocks to return (None = all)
         min_volume_usd: Minimum average daily dollar volume (for 'All' mode)
         min_volume_stocks: Minimum average daily share volume (for 'All' mode)
@@ -261,6 +263,7 @@ def get_stock_universe(stocks_to_scan: str = 'SP500',
         List of ticker symbols to scan
     """
     from .etf_universe import get_all_etfs
+    from .commodity_universe import get_all_commodities
 
     print("="*80)
     print("FETCHING STOCK UNIVERSE")
@@ -319,6 +322,15 @@ def get_stock_universe(stocks_to_scan: str = 'SP500',
         print(f"✓ Loaded {len(etf_tickers)} ETFs")
         all_tickers.extend(etf_tickers)
         scan_types.append('ETFs')
+
+    # Add Commodities if requested
+    if commodities_to_scan:
+        print("Selected: Commodities - All major commodity futures")
+        print()
+        commodity_tickers = get_all_commodities()
+        print(f"✓ Loaded {len(commodity_tickers)} commodity futures")
+        all_tickers.extend(commodity_tickers)
+        scan_types.append('Commodities')
 
     # Remove duplicates while preserving order
     seen = set()

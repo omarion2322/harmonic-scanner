@@ -70,6 +70,10 @@ class HarmonicPattern:
     # PRZ (Potential Reversal Zone) levels
     prz_levels: Dict[str, float]
 
+    # D-Point Range (PRZ boundaries)
+    d_point_range_min: float = 0.0  # Minimum valid D-point price (lower bound of PRZ)
+    d_point_range_max: float = 0.0  # Maximum valid D-point price (upper bound of PRZ)
+
     days_since_completion: int = 0
     # pattern_quality: str = "STANDARD"  # EXCELLENT, GOOD, STANDARD - REMOVED
     tolerance_level: str = "Standard"  # Textbook, Standard, or Relaxed
@@ -286,6 +290,15 @@ class PatternDetector:
             # Calculate PRZ levels
             prz_levels = calculate_prz_levels(x_price, a_price, b_price, c_price, pattern_spec)
 
+            # Calculate D-point range (PRZ boundaries) around the actual detected D-point
+            # The PRZ is a zone, not a single price - entries anywhere in this zone are valid
+            # Use 2% tolerance as standard PRZ zone width (configurable)
+            prz_tolerance_pct = config.PRZ_TOLERANCE_PCT if hasattr(config, 'PRZ_TOLERANCE_PCT') else 0.02
+
+            # Calculate the range centered on the detected D-point
+            d_point_range_min = d_price * (1 - prz_tolerance_pct)
+            d_point_range_max = d_price * (1 + prz_tolerance_pct)
+
             # Stop loss using Carney's pattern-specific ratio
             stop_loss = calculate_stop_loss(pattern_spec, x_price, xa_range, is_bullish)
 
@@ -398,6 +411,8 @@ class PatternDetector:
                 target_point_a=target_point_a,
                 risk_reward=risk_reward,
                 prz_levels=prz_levels,
+                d_point_range_min=d_point_range_min,
+                d_point_range_max=d_point_range_max,
                 days_since_completion=0,
                 # pattern_quality=pattern_quality,  # REMOVED
                 tolerance_level=tolerance_level,
@@ -1134,11 +1149,19 @@ class PatternDetector:
         if hasattr(pattern, 'tp_strategy_used') and pattern.tp_strategy_used:
             tp_strategy_display = f"\nStrategy: {pattern.tp_strategy_used}"
 
+        # Calculate PRZ range display
+        prz_range_text = ""
+        if pattern.d_point_range_min > 0 and pattern.d_point_range_max > 0:
+            # Calculate the tolerance percentage from entry price
+            range_from_entry = ((pattern.d_point_range_max - pattern.entry_price) / pattern.entry_price) * 100
+            prz_range_text = f"Entry Zone: ${pattern.d_point_range_min:.2f} - ${pattern.d_point_range_max:.2f} (±{range_from_entry:.1f}%)\n"
+
         # Enhanced pattern info box (TOP LEFT)
         info_text = (
             f"TRADING LEVELS\n"
             f"{'─'*20}\n"
             f"Entry: ${pattern.entry_price:.2f}\n"
+            f"{prz_range_text}"
             f"Stop:  ${pattern.stop_loss:.2f}\n"
             f"Risk:  {risk_pct:.1f}%\n"
             f"\n"

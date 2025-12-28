@@ -96,6 +96,10 @@ STOCK_TICKERS = ['ONDS', 'RIVN', 'TIC', 'IQ', 'PANW', 'DOCU', 'LAC', 'URA', 'FRS
 # Set to True to include all leading ETFs (135 total), False to skip ETFs
 SCAN_ETFS = True
 
+# Commodity universe to scan
+# Set to True to include major commodity futures, False to skip commodities
+SCAN_COMMODITIES = True
+
 CRYPTOS_TO_SCAN = 'Top100'  # Options: 'Top100', 'Top50', 'Top20', or None
 
 # Volume filtering mode (applies to 'All' Nasdaq mode only)
@@ -119,8 +123,14 @@ MAX_STOCKS_TO_SCAN = 10000  # Set to 50 for testing
 
 # Add delay between stock downloads to avoid rate limiting
 # In seconds (0.1 = 100ms, 0.5 = 500ms)
-# Increase if you get rate limit errors
-DOWNLOAD_DELAY = 0.0
+# Recommended: 0.2-0.3s to avoid rate limiting (adds ~6-10 min for 1800 stocks)
+# Set to 0.0 for fastest scanning (risk of rate limits on large batches)
+DOWNLOAD_DELAY = 0.25
+
+# Maximum number of retry attempts for failed downloads
+# Uses exponential backoff: 1s, 2s, 4s delays between retries
+# Recommended: 3 retries (handles temporary network issues and rate limits)
+MAX_DOWNLOAD_RETRIES = 3
 
 
 # ============================================================================
@@ -149,7 +159,7 @@ VOLUME_MULTIPLIER = 1.5
 # When True: Shows up to 50 HOLD signals with reasons
 # When False: Only counts HOLD signals in summary
 # Note: HOLD reasons are always generated in verbose mode
-INCLUDE_HOLD_IN_REPORT = True
+INCLUDE_HOLD_IN_REPORT = False
 
 # Verbose mode: Generate detailed asset-specific explanations
 # When True, reports include detailed analysis for each stock explaining
@@ -241,7 +251,7 @@ TP_STRATEGY = 'MITCH'  # <<< CHANGE THIS TO SELECT YOUR TAKE PROFIT STRATEGY
 
 def get_stock_list() -> list:
     """
-    Get list of stocks and ETFs to scan based on STOCKS_TO_SCAN and ETFS_TO_SCAN settings.
+    Get list of stocks, ETFs, and commodities to scan based on configuration settings.
 
     Returns:
         List of ticker symbols
@@ -251,6 +261,7 @@ def get_stock_list() -> list:
     return get_stock_universe(
         stocks_to_scan=STOCKS_TO_SCAN,
         etfs_to_scan=SCAN_ETFS,
+        commodities_to_scan=SCAN_COMMODITIES,
         max_stocks=MAX_STOCKS_TO_SCAN,
         min_volume_usd=MIN_VOLUME_USD,
         min_volume_stocks=MIN_VOLUME_STOCKS,
@@ -314,6 +325,12 @@ def get_settings_summary():
         print(f"  ETF Universe: All leading ETFs (135 total)")
     else:
         print(f"  ETF Universe: Disabled")
+
+    # Commodity Universe
+    if SCAN_COMMODITIES:
+        print(f"  Commodity Universe: All major commodity futures (~25 total)")
+    else:
+        print(f"  Commodity Universe: Disabled")
 
     if STOCKS_TO_SCAN and STOCKS_TO_SCAN.upper() == 'ALL':
         if FILTER_BY_STOCK_VOLUME:

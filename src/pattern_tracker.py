@@ -67,6 +67,15 @@ class PatternSnapshot:
     target_2: float
     target_3: float
 
+    # Entry locking (Solution 1)
+    entry_locked: bool  # True when pattern first completes
+    original_entry_price: float  # First valid entry price (never changes)
+    original_entry_date: str  # When pattern first reached PRZ
+
+    # D-Point Range (Solution 2)
+    d_point_range_min: float  # Minimum valid D-point price
+    d_point_range_max: float  # Maximum valid D-point price
+
     # Pattern metrics
     grade: str
     risk_reward: float
@@ -94,7 +103,21 @@ class PatternSnapshot:
 
     @staticmethod
     def from_dict(data: dict) -> 'PatternSnapshot':
-        """Create from dictionary"""
+        """Create from dictionary with backward compatibility for old patterns"""
+        # Add default values for new fields if they don't exist
+        defaults = {
+            'entry_locked': False,
+            'original_entry_price': data.get('entry_price', 0.0),
+            'original_entry_date': '',
+            'd_point_range_min': 0.0,
+            'd_point_range_max': 0.0
+        }
+
+        # Merge defaults with data (data takes precedence)
+        for key, value in defaults.items():
+            if key not in data:
+                data[key] = value
+
         return PatternSnapshot(**data)
 
 
@@ -193,9 +216,26 @@ class PatternTracker:
         try:
             with open(self.active_patterns_file, 'r') as f:
                 data = json.load(f)
-                return {k: PatternSnapshot.from_dict(v) for k, v in data.items()}
+                patterns = {}
+                for k, v in data.items():
+                    try:
+                        patterns[k] = PatternSnapshot.from_dict(v)
+                    except Exception as e:
+                        print(f"Warning: Could not load pattern {k}: {e}")
+                        # Skip corrupted patterns
+                        continue
+                return patterns
         except Exception as e:
-            print(f"Warning: Could not load active patterns: {e}")
+            print(f"Warning: Could not load active patterns file: {e}")
+            print(f"Starting with empty pattern tracker. Old data preserved as backup.")
+            # Backup the corrupted file
+            import shutil
+            backup_path = self.active_patterns_file.with_suffix('.json.bak')
+            try:
+                shutil.copy(self.active_patterns_file, backup_path)
+                print(f"Backup saved to: {backup_path}")
+            except:
+                pass
             return {}
 
     def _save_active_patterns(self):
@@ -331,6 +371,15 @@ class PatternTracker:
         # Calculate completion percentage based on current price vs D-point
         completion_pct, pattern_status = self._calculate_completion(pattern, price_data)
 
+        # Get D-point range from pattern (if available)
+        d_range_min = getattr(pattern, 'd_point_range_min', pattern.d.price)
+        d_range_max = getattr(pattern, 'd_point_range_max', pattern.d.price)
+
+        # Entry locking: lock entry when pattern first completes
+        entry_locked = (pattern_status == PatternStatus.COMPLETED.value)
+        original_entry_price = pattern.entry_price if entry_locked else pattern.d.price
+        original_entry_date = current_timestamp if entry_locked else ""
+
         snapshot = PatternSnapshot(
             pattern_id=pattern_id,
             ticker=ticker,
@@ -351,6 +400,13 @@ class PatternTracker:
             target_1=pattern.ipo_target_1,
             target_2=pattern.ipo_target_2,
             target_3=pattern.target_point_a,
+            # Entry locking fields
+            entry_locked=entry_locked,
+            original_entry_price=original_entry_price,
+            original_entry_date=original_entry_date,
+            # D-point range fields
+            d_point_range_min=d_range_min,
+            d_point_range_max=d_range_max,
             grade=pattern.grade,
             risk_reward=pattern.risk_reward,
             completion_percentage=completion_pct,
@@ -389,6 +445,16 @@ class PatternTracker:
         current_date = datetime.fromisoformat(current_timestamp)
         snapshot.days_monitored = (current_date - first_detected).days
 
+        # Check pattern completion status to lock entry
+        completion_pct, pattern_status = self._calculate_completion(pattern, price_data)
+
+        # Lock entry when pattern first transitions to COMPLETED
+        if not snapshot.entry_locked and pattern_status == PatternStatus.COMPLETED.value:
+            snapshot.entry_locked = True
+            snapshot.original_entry_price = pattern.entry_price
+            snapshot.original_entry_date = current_timestamp
+            print(f"  🔒 Pattern {pattern_id}: Entry locked at ${pattern.entry_price:.2f}")
+
         # Check if D-point has moved
         old_d_price = snapshot.d_price
         new_d_price = pattern.d.price
@@ -418,6 +484,16 @@ class PatternTracker:
             snapshot.d_date = pattern.d.date.isoformat()
             snapshot.d_price = new_d_price
 
+            # Update current entry_price (for tracking), but preserve original_entry_price if locked
+            snapshot.entry_price = pattern.entry_price
+
+            # Update D-point range ONLY if entry is not locked
+            # Once entry is locked, the PRZ zone is fixed and should not change
+            if not snapshot.entry_locked:
+                snapshot.d_point_range_min = getattr(pattern, 'd_point_range_min', pattern.d.price)
+                snapshot.d_point_range_max = getattr(pattern, 'd_point_range_max', pattern.d.price)
+            # If entry is locked, preserve the original PRZ zone
+
             # Re-analyze reaction with updated data
             if snapshot.status in [PatternStatus.COMPLETED.value,
                                   PatternStatus.AWAITING_CONFIRMATION.value]:
@@ -431,6 +507,11 @@ class PatternTracker:
         Detects Type 1 and Type 2 reactions.
         """
         try:
+            # Validate price_data
+            if price_data is None or len(price_data) == 0:
+                snapshot.status = PatternStatus.AWAITING_CONFIRMATION.value
+                return
+
             # Get price action after D-point
             d_date = pd.Timestamp(snapshot.d_date)
             after_d = price_data[price_data.index > d_date].copy()
