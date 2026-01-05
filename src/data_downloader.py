@@ -65,7 +65,8 @@ def download_stock_data(
             df = stock.history(
                 period=period,
                 interval=interval,
-                auto_adjust=auto_adjust
+                auto_adjust=auto_adjust,
+                raise_errors=False  # Don't raise exceptions for warnings (e.g., dividend metadata issues)
             )
 
             # Check if download succeeded
@@ -77,20 +78,58 @@ def download_stock_data(
                 return df
             else:
                 # Empty DataFrame - stock might not exist or have no data
-                last_error = f"No data returned"
+                last_error = f"No data returned (DataFrame is empty but no exception raised)"
 
         except Exception as e:
-            last_error = str(e)
+            error_str = str(e)
+
+            # Handle yfinance dividend metadata errors gracefully
+            # These errors occur when dividend dates don't align with the requested interval
+            # but don't actually prevent price data from being downloaded
+            # Example: "The following 'Dividends' events are out-of-range..."
+            if 'dividends' in error_str.lower() and 'out-of-range' in error_str.lower():
+                # This is a yfinance bug with certain period/interval combinations
+                # Try alternative periods that avoid the problematic dividend dates
+                fallback_periods = []
+
+                # Determine fallback periods based on requested period
+                if period in ['5y', 'max']:
+                    fallback_periods = ['2y', '3y', '1y']
+                elif period == '2y':
+                    fallback_periods = ['1y', '18mo']
+                elif period == '1y':
+                    fallback_periods = ['6mo', '1y']
+
+                # Try fallback periods
+                for fallback_period in fallback_periods:
+                    try:
+                        stock = yf.Ticker(ticker)
+                        df = stock.history(
+                            period=fallback_period,
+                            interval=interval,
+                            auto_adjust=auto_adjust,
+                            raise_errors=False
+                        )
+                        if not df.empty:
+                            if first_failure_logged:
+                                print(f"${ticker}: ✓ Dividend error bypassed using period={fallback_period}")
+                            return df
+                    except:
+                        continue  # Try next fallback period
+
+                # If all fallbacks failed, continue to retry logic
+
+            last_error = error_str
 
             # Check for specific errors that shouldn't be retried
-            error_str = str(e).lower()
+            error_str_lower = error_str.lower()
 
             # Don't retry for these permanent errors
-            if any(x in error_str for x in [
+            # Note: "delisted" and "not found" are NOT in this list because yfinance
+            # sometimes incorrectly reports these errors for valid tickers
+            if any(x in error_str_lower for x in [
                 'invalid ticker',
-                'no timezone found',
-                'delisted',
-                'not found'
+                'no timezone found'
             ]):
                 return pd.DataFrame()
 

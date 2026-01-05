@@ -75,6 +75,12 @@ ENABLE_TEMPORAL_VALIDATION = True
 # Historical data period to analyze
 DATA_PERIOD = _TIMEFRAME_CONFIG['DATA_PERIOD']
 
+# Minimum bars required for pattern detection
+# Harmonic patterns need sufficient history to identify valid XABCD points
+# 50 bars = ~1 year for weekly, ~2.5 months for daily
+# Reduce this to scan newer tickers (e.g., 30 bars), but may reduce pattern quality
+MIN_BARS_REQUIRED = 30
+
 CRYPTO_TICKERS = ['BTC-USD', 'ETH-USD', 'LTC-USD', 'XRP-USD']
 
 # ============================================================================
@@ -165,6 +171,12 @@ INCLUDE_HOLD_IN_REPORT = False
 # When True, reports include detailed analysis for each stock explaining
 # why it received a BUY/SELL/HOLD signal with pattern-specific details
 VERBOSE_REPORTS = False
+
+# Maximum number of maturing patterns to display in "MONITORING - PATTERNS MATURING" section
+# Shows the X patterns closest to completion (highest completion percentage)
+# Set to a higher value if you want to see more patterns (e.g., 50, 100, 200)
+# Set to None to show all maturing patterns
+MAX_MATURING_PATTERNS_DISPLAY_IN_REPORT = 50
 
 # ============================================================================
 # ADVANCED SETTINGS
@@ -267,7 +279,8 @@ def get_stock_list() -> list:
         min_volume_stocks=MIN_VOLUME_STOCKS,
         filter_by_stock_volume=FILTER_BY_STOCK_VOLUME,
         download_delay=DOWNLOAD_DELAY,
-        timeframe = DATA_INTERVAL
+        timeframe=DATA_INTERVAL,
+        min_bars=MIN_BARS_REQUIRED
     )
 
 

@@ -30,6 +30,7 @@ except ImportError:
 
 # Import TP strategies
 from tp_strategies import ScottStrategy, MitchStrategy, PositionStrategy, TPStrategy
+from utils import ConfigHelper
 
 
 @dataclass
@@ -115,6 +116,7 @@ class PatternDetector:
             'cypher', 'shark', '5_0'
         ]
         self._tp_strategy_cache = None  # Cache the strategy instance
+        self.config_helper = ConfigHelper(config)  # Configuration helper
 
     def _get_tp_strategy(self) -> TPStrategy:
         """
@@ -126,8 +128,8 @@ class PatternDetector:
         if self._tp_strategy_cache is not None:
             return self._tp_strategy_cache
 
-        strategy_name = config.TP_STRATEGY if hasattr(config, 'TP_STRATEGY') else 'SCOTT'
-        swing_window = config.SWING_WINDOW if hasattr(config, 'SWING_WINDOW') else 5
+        strategy_name = self.config_helper.get('TP_STRATEGY', 'SCOTT')
+        swing_window = self.config_helper.get_int('SWING_WINDOW', 5)
 
         if strategy_name == 'MITCH':
             self._tp_strategy_cache = MitchStrategy(swing_window=swing_window)
@@ -165,7 +167,7 @@ class PatternDetector:
             List of HarmonicPattern objects with Carney trading specs applied
         """
         # Create Technicals object for pyharmonics
-        peak_spacing = config.SWING_WINDOW if hasattr(config, 'SWING_WINDOW') else 3
+        peak_spacing = self.config_helper.get_int('SWING_WINDOW', 3)
         tech = Technicals(df, symbol, interval, peak_spacing=peak_spacing)
 
         # Get Fibonacci tolerance from config
@@ -192,7 +194,7 @@ class PatternDetector:
                 rejected_count += 1
 
         # Show summary if patterns were rejected
-        verbose = config.VERBOSE_REPORTS if hasattr(config, 'VERBOSE_REPORTS') else False
+        verbose = self.config_helper.get_bool('VERBOSE_REPORTS', False)
         if rejected_count > 0 and verbose:
             print(f"  {symbol}: {rejected_count} pattern(s) rejected (invalid duration)")
 
@@ -293,7 +295,7 @@ class PatternDetector:
             # Calculate D-point range (PRZ boundaries) around the actual detected D-point
             # The PRZ is a zone, not a single price - entries anywhere in this zone are valid
             # Use 2% tolerance as standard PRZ zone width (configurable)
-            prz_tolerance_pct = config.PRZ_TOLERANCE_PCT if hasattr(config, 'PRZ_TOLERANCE_PCT') else 0.02
+            prz_tolerance_pct = self.config_helper.get_float('PRZ_TOLERANCE_PCT', 0.02)
 
             # Calculate the range centered on the detected D-point
             d_point_range_min = d_price * (1 - prz_tolerance_pct)
@@ -340,8 +342,8 @@ class PatternDetector:
             tp_strategy_used = tp_targets.tp_strategy_used if hasattr(tp_targets, 'tp_strategy_used') else ""
 
             # Check if TP strategy has custom stop loss calculation
-            max_allowed_stop_loss_pct = config.MAX_ALLOWED_STOP_LOSS_PCT if hasattr(config, 'MAX_ALLOWED_STOP_LOSS_PCT') else 10.0
-            min_allowed_stop_loss_pct = config.MIN_ALLOWED_STOP_LOSS_PCT if hasattr(config, 'MIN_ALLOWED_STOP_LOSS_PCT') else 3.0
+            max_allowed_stop_loss_pct = self.config_helper.get_float('MAX_ALLOWED_STOP_LOSS_PCT', 10.0)
+            min_allowed_stop_loss_pct = self.config_helper.get_float('MIN_ALLOWED_STOP_LOSS_PCT', 3.0)
             strategy_stop_loss = tp_strategy.calculate_stop_loss(
                 pattern_high=pattern_high,
                 pattern_low=pattern_low,
@@ -446,7 +448,7 @@ class PatternDetector:
             (is_valid, reason): Tuple of boolean and reason string
         """
         # Check if temporal validation is enabled
-        if not (hasattr(config, 'ENABLE_TEMPORAL_VALIDATION') and config.ENABLE_TEMPORAL_VALIDATION):
+        if not self.config_helper.get_bool('ENABLE_TEMPORAL_VALIDATION', True):
             return True, ""
 
         # Calculate time durations in days
@@ -462,12 +464,12 @@ class PatternDetector:
             return False, f"Invalid time sequence: XA={xa_time}d, AB={ab_time}d, BC={bc_time}d"
 
         # Check maximum total pattern duration (prevents 24-year patterns like SHEN!)
-        max_total_duration = config.MAX_TOTAL_PATTERN_DURATION_DAYS if hasattr(config, 'MAX_TOTAL_PATTERN_DURATION_DAYS') else 1825
+        max_total_duration = self.config_helper.get_int('MAX_TOTAL_PATTERN_DURATION_DAYS', 1825)
         if total_time > max_total_duration:
             return False, f"Total pattern duration too long: {total_time} days ({total_time/365:.1f} years, max {max_total_duration/365:.1f} years)"
 
         # Check maximum individual leg duration (prevents 19-year XA legs!)
-        max_leg_duration = config.MAX_INDIVIDUAL_LEG_DURATION_DAYS if hasattr(config, 'MAX_INDIVIDUAL_LEG_DURATION_DAYS') else 1095
+        max_leg_duration = self.config_helper.get_int('MAX_INDIVIDUAL_LEG_DURATION_DAYS', 1095)
 
         if xa_time > max_leg_duration:
             return False, f"XA leg too long: {xa_time} days ({xa_time/365:.1f} years, max {max_leg_duration/365:.1f} years)"
@@ -485,10 +487,10 @@ class PatternDetector:
         cd_to_xabc_ratio = cd_time / xabc_time if xabc_time > 0 else 0
 
         # Get thresholds from config (with defaults)
-        max_cd_xa = config.MAX_CD_TO_XA_TIME_RATIO if hasattr(config, 'MAX_CD_TO_XA_TIME_RATIO') else 5.0
-        max_cd_ab = config.MAX_CD_TO_AB_TIME_RATIO if hasattr(config, 'MAX_CD_TO_AB_TIME_RATIO') else 10.0
-        max_cd_bc = config.MAX_CD_TO_BC_TIME_RATIO if hasattr(config, 'MAX_CD_TO_BC_TIME_RATIO') else 8.0
-        max_cd_xabc = config.MAX_CD_TO_XABC_TIME_RATIO if hasattr(config, 'MAX_CD_TO_XABC_TIME_RATIO') else 3.0
+        max_cd_xa = self.config_helper.get_float('MAX_CD_TO_XA_TIME_RATIO', 5.0)
+        max_cd_ab = self.config_helper.get_float('MAX_CD_TO_AB_TIME_RATIO', 10.0)
+        max_cd_bc = self.config_helper.get_float('MAX_CD_TO_BC_TIME_RATIO', 8.0)
+        max_cd_xabc = self.config_helper.get_float('MAX_CD_TO_XABC_TIME_RATIO', 3.0)
 
         # Check if CD is disproportionately long
         if cd_to_xa_ratio > max_cd_xa:
@@ -1256,7 +1258,7 @@ class PatternDetector:
         if max_days_old is None:
             try:
                 import config
-                max_days_old = config.MAX_DAYS_SINCE_PATTERN if hasattr(config, 'MAX_DAYS_SINCE_PATTERN') else 730
+                max_days_old = self.config_helper.get_int('MAX_DAYS_SINCE_PATTERN', 730)
             except ImportError:
                 max_days_old = 730  # Default to 2 years if config not available
 
@@ -1269,11 +1271,11 @@ class PatternDetector:
             # Use different R/R filters based on pattern direction
             if pattern.is_bullish:
                 # LONG (BUY) patterns - higher R/R potential
-                min_rr = config.MIN_LONG_RISK_REWARD_RATIO if hasattr(config, 'MIN_LONG_RISK_REWARD_RATIO') else 1.5
+                min_rr = self.config_helper.get_float('MIN_LONG_RISK_REWARD_RATIO', 1.5)
                 signal_type = "LONG"
             else:
                 # SHORT (SELL) patterns - lower R/R due to limited downside
-                min_rr = config.MIN_SHORT_RISK_REWARD_RATIO if hasattr(config, 'MIN_SHORT_RISK_REWARD_RATIO') else 1.5
+                min_rr = self.config_helper.get_float('MIN_SHORT_RISK_REWARD_RATIO', 1.5)
                 signal_type = "SHORT"
         except ImportError:
             min_rr = 1.5
@@ -1285,7 +1287,7 @@ class PatternDetector:
         # Check risk percentage from config
         try:
             import config
-            max_risk_pct = config.MAX_ALLOWED_STOP_LOSS_PCT if hasattr(config, 'MAX_ALLOWED_STOP_LOSS_PCT') else 10.0
+            max_risk_pct = self.config_helper.get_float('MAX_ALLOWED_STOP_LOSS_PCT', 10.0)
         except ImportError:
             max_risk_pct = 10.0
 
@@ -1598,10 +1600,12 @@ if __name__ == "__main__":
         current_price = df['close'].iloc[-1]
         signal, explanation = detector.generate_signal(pattern, current_price)
 
+        from utils import FormattingUtils
+
         print(f"Pattern {i}: {pattern.pattern_type.upper()} ({'BULLISH' if pattern.is_bullish else 'BEARISH'}) [Grade {pattern.grade}]")
         print(f"  Points: X=${pattern.x.price:.2f} -> A=${pattern.a.price:.2f} -> B=${pattern.b.price:.2f} -> C=${pattern.c.price:.2f} -> D=${pattern.d.price:.2f}")
         print(f"  Date Range: {pattern.x.date.date()} to {pattern.d.date.date()}")
-        print(f"  Ratios: AB/XA={pattern.ab_xa_ratio:.3f}, BC_proj={pattern.bc_projection:.3f}, AD/XA={pattern.ad_xa_ratio:.3f}")
+        print(f"  Ratios: {FormattingUtils.format_pattern_ratios(pattern)}")
         print(f"  Signal: {signal}")
         print(f"  {explanation}")
         print()
