@@ -252,8 +252,21 @@ class PatternTracker:
         try:
             history = []
             if self.history_file.exists():
-                with open(self.history_file, 'r') as f:
-                    history = json.load(f)
+                try:
+                    with open(self.history_file, 'r') as f:
+                        history = json.load(f)
+                except json.JSONDecodeError as e:
+                    # Corrupted JSON file - backup and start fresh
+                    print(f"Warning: Corrupted history file detected: {e}")
+                    import shutil
+                    backup_path = self.history_file.with_suffix(f'.json.corrupt.{datetime.now().strftime("%Y%m%d_%H%M%S")}')
+                    try:
+                        shutil.copy(self.history_file, backup_path)
+                        print(f"Corrupted history backed up to: {backup_path}")
+                    except Exception as backup_error:
+                        print(f"Could not backup corrupted file: {backup_error}")
+                    # Start with empty history
+                    history = []
 
             history.append(pattern.to_dict())
 

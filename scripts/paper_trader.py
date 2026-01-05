@@ -47,6 +47,9 @@ class TradeStatus:
     t3_date: str = None
     stop_date: str = None
 
+    # Actual prices when hit (can differ from planned due to gaps)
+    stop_hit_price: float = None
+
     # P&L calculation
     total_pnl: float = 0.0
     total_pnl_percent: float = 0.0
@@ -129,15 +132,18 @@ def check_trade_status(trade: Dict, investment_per_trade: float = 10000.0) -> Tr
         # Track target and stop hits
         t1_hit, t2_hit, t3_hit, stop_hit = False, False, False, False
         t1_date, t2_date, t3_date, stop_date = None, None, None, None
+        stop_hit_price = None
 
         # Check each day's price action
         for date, row in hist.iterrows():
-            high, low = row['High'], row['Low']
+            high, low, open_price = row['High'], row['Low'], row['Open']
 
             if trade['signal_type'] == 'BUY':
                 # Long trades
                 if not stop_hit and low <= trade['stop_loss']:
                     stop_hit, stop_date = True, date
+                    # If gap down, use open price; otherwise use stop loss price
+                    stop_hit_price = open_price if open_price < trade['stop_loss'] else trade['stop_loss']
                 if not t1_hit and high >= trade['target1']:
                     t1_hit, t1_date = True, date
                 if t1_hit and not t2_hit and high >= trade['target2']:
@@ -148,6 +154,8 @@ def check_trade_status(trade: Dict, investment_per_trade: float = 10000.0) -> Tr
                 # Short trades
                 if not stop_hit and high >= trade['stop_loss']:
                     stop_hit, stop_date = True, date
+                    # If gap up, use open price; otherwise use stop loss price
+                    stop_hit_price = open_price if open_price > trade['stop_loss'] else trade['stop_loss']
                 if not t1_hit and low <= trade['target1']:
                     t1_hit, t1_date = True, date
                 if t1_hit and not t2_hit and low <= trade['target2']:
@@ -187,14 +195,16 @@ def check_trade_status(trade: Dict, investment_per_trade: float = 10000.0) -> Tr
         # Remaining position
         if stop_hit and remaining_position > 0:
             remaining_shares = shares * remaining_position
-            total_pnl += calculate_position_pnl(remaining_shares, trade['entry_price'], trade['stop_loss'], trade['signal_type'])
+            # Use actual stop hit price (which accounts for gaps) instead of planned stop loss
+            total_pnl += calculate_position_pnl(remaining_shares, trade['entry_price'], stop_hit_price, trade['signal_type'])
         elif remaining_position > 0:
             # Use current price for open position
             remaining_shares = shares * remaining_position
             total_pnl += calculate_position_pnl(remaining_shares, trade['entry_price'], current_price, trade['signal_type'])
 
         # Determine status
-        if total_pnl < 0:
+        if stop_hit and remaining_position > 0:
+            # Stop was hit and we still have remaining position = stopped out
             status = 'STOPPED_OUT'
         elif remaining_position == 0:
             status = 'FULL_WIN'
@@ -227,6 +237,7 @@ def check_trade_status(trade: Dict, investment_per_trade: float = 10000.0) -> Tr
             t2_date=t2_date.strftime('%Y-%m-%d') if t2_date is not None else None,
             t3_date=t3_date.strftime('%Y-%m-%d') if t3_date is not None else None,
             stop_date=stop_date.strftime('%Y-%m-%d') if stop_date is not None else None,
+            stop_hit_price=stop_hit_price,
             total_pnl=total_pnl,
             total_pnl_percent=pnl_percent,
             remaining_position=remaining_position,
@@ -324,7 +335,7 @@ def run_paper_trader(trades_file: str = None, investment_per_trade: float = 1000
         print("No trades to monitor.")
         return
 
-    print_section_header(f"P    APER TRADING MONITOR - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print_section_header(f"PAPER TRADING MONITOR - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
     # Check each trade
     trade_statuses = []
@@ -336,6 +347,25 @@ def run_paper_trader(trades_file: str = None, investment_per_trade: float = 1000
         # Update trade in JSON if requested
         if update_file:
             trade['status'] = status.status
+            trade['current_price'] = float(status.current_price)
+            trade['total_pnl'] = float(status.total_pnl)
+            trade['total_pnl_percent'] = float(status.total_pnl_percent)
+            trade['remaining_position'] = float(status.remaining_position)
+
+            # Target hits
+            trade['t1_hit'] = status.t1_hit
+            trade['t2_hit'] = status.t2_hit
+            trade['t3_hit'] = status.t3_hit
+            trade['stop_hit'] = status.stop_hit
+
+            # Dates when targets/stop hit
+            trade['t1_hit_date'] = status.t1_date
+            trade['t2_hit_date'] = status.t2_date
+            trade['t3_hit_date'] = status.t3_date
+            trade['stop_hit_date'] = status.stop_date
+
+            # Actual stop hit price (can differ from planned due to gaps)
+            trade['stop_hit_price'] = float(status.stop_hit_price) if status.stop_hit_price is not None else None
 
     # Calculate overall statistics
     total_trades = len(trade_statuses)

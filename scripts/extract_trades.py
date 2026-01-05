@@ -37,8 +37,14 @@ class PaperTrade:
     status: str = "OPEN"  # OPEN, CLOSED, STOPPED_OUT
 
     def get_unique_id(self) -> str:
-        """Generate unique ID for this trade"""
-        return f"{self.ticker}_{self.signal_type}_{self.detected_date}"
+        """
+        Generate unique ID for this trade.
+        Uses ticker + signal_type + pattern + timeframe to identify the same pattern.
+        Does NOT use detected_date to prevent duplicates when the same pattern is detected on different days.
+        """
+        # Normalize pattern name (remove direction indicators)
+        pattern_normalized = self.pattern.replace(' (BULLISH)', '').replace(' (BEARISH)', '').strip()
+        return f"{self.ticker}_{self.signal_type}_{pattern_normalized}_{self.timeframe}"
 
 
 def parse_report_file(filepath: Path, timeframe: str, min_grade: str = "C-",
@@ -171,8 +177,13 @@ def load_existing_trades(filepath: Path) -> Dict[str, Dict]:
         with open(filepath, 'r') as f:
             trades_list = json.load(f)
             # Convert list to dict with unique IDs as keys
-            return {trade['ticker'] + '_' + trade['signal_type'] + '_' + trade['detected_date']: trade
-                   for trade in trades_list}
+            # Use same unique ID format as PaperTrade.get_unique_id()
+            result = {}
+            for trade in trades_list:
+                pattern_normalized = trade['pattern'].replace(' (BULLISH)', '').replace(' (BEARISH)', '').strip()
+                unique_id = f"{trade['ticker']}_{trade['signal_type']}_{pattern_normalized}_{trade['timeframe']}"
+                result[unique_id] = trade
+            return result
     return {}
 
 
@@ -238,11 +249,19 @@ def extract_trades(report_date: str = None, timeframe: str = '1wk',
         trade_id = trade.get_unique_id()
 
         if trade_id in existing_trades:
-            # Update existing trade if it's still OPEN (in case entry/targets changed)
-            if existing_trades[trade_id]['status'] == 'OPEN':
-                existing_trades[trade_id] = asdict(trade)
+            # Trade already exists - check if we should update or skip
+            existing_trade = existing_trades[trade_id]
+
+            if existing_trade['status'] == 'OPEN':
+                # Update the trade with new data, but preserve original dates
+                new_trade_dict = asdict(trade)
+                # Preserve the original extracted_date and detected_date
+                new_trade_dict['extracted_date'] = existing_trade['extracted_date']
+                new_trade_dict['detected_date'] = existing_trade['detected_date']
+                existing_trades[trade_id] = new_trade_dict
                 updated_count += 1
             else:
+                # Trade is closed or stopped out - don't update
                 skipped_count += 1
         else:
             # Add new trade

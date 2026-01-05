@@ -162,9 +162,10 @@ def get_major_nasdaq_tickers() -> List[str]:
 def filter_by_volume(tickers: List[str], min_volume_usd: float = 1_000_000,
                      min_volume_stocks: float = 1_000_000,
                      filter_by_stock_volume: bool = False,
-                     lookback_days: int = 7, delay: float = 0.1) -> List[str]:
+                     lookback_days: int = 7, delay: float = 0.1,
+                     min_bars: int = 30, interval: str = '1wk') -> List[str]:
     """
-    Filter tickers by average daily volume (dollar or share volume).
+    Filter tickers by average daily volume (dollar or share volume) and minimum bar count.
 
     Args:
         tickers: List of ticker symbols to filter
@@ -173,18 +174,23 @@ def filter_by_volume(tickers: List[str], min_volume_usd: float = 1_000_000,
         filter_by_stock_volume: If True, use share volume; if False, use dollar volume
         lookback_days: Number of days to calculate average (default: 7)
         delay: Delay between API calls in seconds (default: 0.1)
+        min_bars: Minimum bars required for pattern detection (default: 30)
+        interval: Timeframe interval for bar count check (default: '1wk')
 
     Returns:
-        List of tickers that meet volume criteria
+        List of tickers that meet volume and bar count criteria
     """
     if filter_by_stock_volume:
         print(f"\nFiltering {len(tickers)} tickers by SHARE volume (>{min_volume_stocks:,.0f} shares avg over {lookback_days} days)...")
     else:
         print(f"\nFiltering {len(tickers)} tickers by DOLLAR volume (>${min_volume_usd:,.0f} USD avg over {lookback_days} days)...")
+    interval_name = {'1d': 'days', '1wk': 'weeks', '1mo': 'months'}.get(interval, 'bars')
+    print(f"Also filtering for tickers with >= {min_bars} {interval_name} of history")
     print("This may take a few minutes...")
 
     filtered_tickers = []
     failed_count = 0
+    insufficient_bars_count = 0
 
     for i, ticker in enumerate(tickers, 1):
         try:
@@ -215,9 +221,24 @@ def filter_by_volume(tickers: List[str], min_volume_usd: float = 1_000_000,
                 avg_volume = hist_filtered_copy['dollar_volume'].mean()
                 meets_criteria = avg_volume >= min_volume_usd
 
-            # Check if meets criteria
-            if meets_criteria:
-                filtered_tickers.append(ticker)
+            # Check if meets volume criteria
+            if not meets_criteria:
+                continue  # Skip to next ticker
+
+            # Additional check: minimum bar count for the trading interval
+            # Download data with the actual trading interval to check bar count
+            try:
+                hist_interval = stock.history(period='5y', interval=interval, raise_errors=False)
+                if hist_interval.empty or len(hist_interval) < min_bars:
+                    insufficient_bars_count += 1
+                    continue  # Skip tickers with insufficient history
+            except:
+                # If we can't check bar count, err on the side of caution and skip
+                insufficient_bars_count += 1
+                continue
+
+            # Ticker meets both volume and bar count criteria
+            filtered_tickers.append(ticker)
 
             # Rate limiting
             time.sleep(delay)
@@ -228,10 +249,13 @@ def filter_by_volume(tickers: List[str], min_volume_usd: float = 1_000_000,
                 print(f"  ⚠ Error fetching {ticker}: {e}")
             continue
 
-    print(f"\n✓ Volume filtering complete:")
-    print(f"  - {len(filtered_tickers)} tickers meet volume criteria")
+    low_volume_count = len(tickers) - len(filtered_tickers) - failed_count - insufficient_bars_count
+
+    print(f"\n✓ Filtering complete:")
+    print(f"  - {len(filtered_tickers)} tickers meet all criteria (volume + history)")
     print(f"  - {failed_count} tickers failed to fetch or had insufficient data")
-    print(f"  - {len(tickers) - len(filtered_tickers) - failed_count} tickers excluded due to low volume")
+    print(f"  - {low_volume_count} tickers excluded due to low volume")
+    print(f"  - {insufficient_bars_count} tickers excluded due to insufficient history (< {min_bars} {interval_name})")
 
     return filtered_tickers
 
@@ -244,7 +268,8 @@ def get_stock_universe(stocks_to_scan: str = 'SP500',
                        min_volume_stocks: float = 1_000_000,
                        filter_by_stock_volume: bool = False,
                        download_delay: float = 0.1,
-                       timeframe: str = '1d') -> List[str]:
+                       timeframe: str = '1d',
+                       min_bars: int = 30) -> List[str]:
     """
     Get list of stocks, ETFs, and commodities to scan based on configuration.
 
@@ -258,6 +283,7 @@ def get_stock_universe(stocks_to_scan: str = 'SP500',
         filter_by_stock_volume: If True, use share volume; if False, use dollar volume
         download_delay: Delay between API calls for volume filtering
         timeframe: Timeframe for scanning ('1d', '1wk', '1mo')
+        min_bars: Minimum bars required for pattern detection (default: 30)
 
     Returns:
         List of ticker symbols to scan
@@ -301,7 +327,9 @@ def get_stock_universe(stocks_to_scan: str = 'SP500',
                 min_volume_stocks=min_volume_stocks,
                 filter_by_stock_volume=filter_by_stock_volume,
                 lookback_days=lookback,
-                delay=download_delay
+                delay=download_delay,
+                min_bars=min_bars,
+                interval=timeframe
             )
 
             all_tickers.extend(nasdaq_tickers)

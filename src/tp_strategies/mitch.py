@@ -29,6 +29,14 @@ import pandas as pd
 import numpy as np
 from typing import List, Tuple
 
+try:
+    import config
+    from utils import ConfigHelper
+    config_helper = ConfigHelper(config)
+except ImportError:
+    config = None
+    config_helper = None
+
 
 class MitchStrategy(TPStrategy):
     """
@@ -100,7 +108,7 @@ class MitchStrategy(TPStrategy):
 
                 # Download full history for comprehensive S/R analysis
                 stock = yf.Ticker(ticker)
-                data_interval = config.DATA_INTERVAL if hasattr(config, 'DATA_INTERVAL') else '1d'
+                data_interval = config_helper.get('DATA_INTERVAL', '1d') if config_helper else '1d'
                 full_history = stock.history(period='max', interval=data_interval, auto_adjust=False)
 
                 if not full_history.empty and len(full_history) > len(price_data):
@@ -466,8 +474,7 @@ class MitchStrategy(TPStrategy):
 
         # Get min_allowed from config if not provided
         if min_allowed_stop_loss_pct is None:
-            import src.config as config
-            min_allowed_stop_loss_pct = config.MIN_ALLOWED_STOP_LOSS_PCT if hasattr(config, 'MIN_ALLOWED_STOP_LOSS_PCT') else 3.0
+            min_allowed_stop_loss_pct = config_helper.get_float('MIN_ALLOWED_STOP_LOSS_PCT', 3.0) if config_helper else 3.0
 
         # Calculate acceptable stop loss range
         if is_bullish:
