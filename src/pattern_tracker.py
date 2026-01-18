@@ -14,9 +14,12 @@ import json
 import pandas as pd
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-from dataclasses import dataclass, asdict
+from typing import Dict, List, Optional, Tuple, Any
 from enum import Enum
+from pydantic import BaseModel, Field, field_validator
+from logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 class PatternStatus(Enum):
@@ -40,77 +43,87 @@ class ReactionType(Enum):
     FAILED = "failed"  # Broke through PRZ without reversal
 
 
-@dataclass
-class PatternSnapshot:
-    """Snapshot of pattern state at a point in time"""
-    pattern_id: str
-    ticker: str
-    pattern_type: str
-    is_bullish: bool
+class PatternSnapshot(BaseModel):
+    """Snapshot of pattern state at a point in time with validation."""
+    pattern_id: str = Field(..., min_length=1, description="Unique pattern identifier")
+    ticker: str = Field(..., min_length=1, description="Stock ticker symbol")
+    pattern_type: str = Field(..., min_length=1, description="Harmonic pattern type")
+    is_bullish: bool = Field(..., description="Pattern direction")
 
     # XABCD points
-    x_date: str
-    x_price: float
-    a_date: str
-    a_price: float
-    b_date: str
-    b_price: float
-    c_date: str
-    c_price: float
-    d_date: str
-    d_price: float
+    x_date: str = Field(..., description="X point date (ISO format)")
+    x_price: float = Field(..., gt=0, description="X point price")
+    a_date: str = Field(..., description="A point date (ISO format)")
+    a_price: float = Field(..., gt=0, description="A point price")
+    b_date: str = Field(..., description="B point date (ISO format)")
+    b_price: float = Field(..., gt=0, description="B point price")
+    c_date: str = Field(..., description="C point date (ISO format)")
+    c_price: float = Field(..., gt=0, description="C point price")
+    d_date: str = Field(..., description="D point date (ISO format)")
+    d_price: float = Field(..., gt=0, description="D point price")
 
     # Trading levels
-    entry_price: float
-    stop_loss: float
-    target_1: float
-    target_2: float
-    target_3: float
+    entry_price: float = Field(..., gt=0, description="Entry price")
+    stop_loss: float = Field(..., gt=0, description="Stop loss price")
+    target_1: float = Field(..., gt=0, description="First profit target")
+    target_2: float = Field(..., gt=0, description="Second profit target")
+    target_3: float = Field(..., gt=0, description="Third profit target")
 
     # Entry locking (Solution 1)
-    entry_locked: bool  # True when pattern first completes
-    original_entry_price: float  # First valid entry price (never changes)
-    original_entry_date: str  # When pattern first reached PRZ
+    entry_locked: bool = Field(False, description="True when pattern first completes")
+    original_entry_price: float = Field(..., gt=0, description="First valid entry price")
+    original_entry_date: str = Field("", description="When pattern first reached PRZ")
 
     # D-Point Range (Solution 2)
-    d_point_range_min: float  # Minimum valid D-point price
-    d_point_range_max: float  # Maximum valid D-point price
+    d_point_range_min: float = Field(0.0, gt=0, description="Minimum valid D-point price")
+    d_point_range_max: float = Field(0.0, gt=0, description="Maximum valid D-point price")
 
     # Pattern metrics
-    grade: str
-    risk_reward: float
-    completion_percentage: float  # 0.0 to 1.0
+    grade: str = Field(..., pattern='^[A-D][+-]?$', description="Pattern grade")
+    risk_reward: float = Field(..., ge=0, description="Risk/reward ratio")
+    completion_percentage: float = Field(..., ge=0.0, le=1.0, description="Pattern completion")
 
     # State tracking
-    status: str
-    reaction_type: str
-    first_detected: str  # ISO timestamp
-    last_updated: str    # ISO timestamp
-    days_monitored: int
+    status: str = Field(..., description="Pattern status")
+    reaction_type: str = Field(..., description="Reaction type")
+    first_detected: str = Field(..., description="ISO timestamp of first detection")
+    last_updated: str = Field(..., description="ISO timestamp of last update")
+    days_monitored: int = Field(0, ge=0, description="Days since first detection")
 
     # Evolution tracking
-    d_price_history: List[float]  # Track D-point movements
-    d_extended: bool  # True if D moved beyond tolerance
+    d_price_history: List[float] = Field(default_factory=list, description="D-point price history")
+    d_extended: bool = Field(False, description="D moved beyond tolerance")
 
     # Reaction metrics
-    max_favorable_move: float  # Max move in favorable direction from D
-    max_adverse_move: float    # Max move against position from D
-    targets_hit: List[int]     # [1, 2] if T1 and T2 hit
+    max_favorable_move: float = Field(0.0, ge=0, description="Max favorable move from D")
+    max_adverse_move: float = Field(0.0, ge=0, description="Max adverse move from D")
+    targets_hit: List[int] = Field(default_factory=list, description="Targets hit (1, 2, 3)")
 
-    def to_dict(self):
-        """Convert to dictionary for JSON serialization"""
-        return asdict(self)
+    @field_validator('targets_hit')
+    @classmethod
+    def validate_targets(cls, v: List[int]) -> List[int]:
+        """Ensure targets are 1, 2, or 3."""
+        for target in v:
+            if target not in [1, 2, 3]:
+                raise ValueError(f'Invalid target: {target}. Must be 1, 2, or 3')
+        return v
 
-    @staticmethod
-    def from_dict(data: dict) -> 'PatternSnapshot':
-        """Create from dictionary with backward compatibility for old patterns"""
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization."""
+        return self.model_dump()
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'PatternSnapshot':
+        """Create from dictionary with backward compatibility for old patterns."""
         # Add default values for new fields if they don't exist
         defaults = {
             'entry_locked': False,
             'original_entry_price': data.get('entry_price', 0.0),
             'original_entry_date': '',
             'd_point_range_min': 0.0,
-            'd_point_range_max': 0.0
+            'd_point_range_max': 0.0,
+            'd_price_history': [],
+            'targets_hit': []
         }
 
         # Merge defaults with data (data takes precedence)
@@ -118,7 +131,10 @@ class PatternSnapshot:
             if key not in data:
                 data[key] = value
 
-        return PatternSnapshot(**data)
+        return cls(**data)
+
+    class Config:
+        str_strip_whitespace = True
 
 
 class PatternTracker:
@@ -126,7 +142,7 @@ class PatternTracker:
     Tracks harmonic patterns across daily scans to monitor evolution and detect confirmations.
     """
 
-    def __init__(self, storage_dir: str = "./pattern_tracking"):
+    def __init__(self, storage_dir: str = "./pattern_tracking") -> None:
         """
         Initialize pattern tracker.
 
@@ -149,7 +165,7 @@ class PatternTracker:
         # Load existing state
         self.active_patterns = self._load_active_patterns()
 
-    def _calculate_completion(self, pattern, price_data: pd.DataFrame) -> Tuple[float, str]:
+    def _calculate_completion(self, pattern: Any, price_data: pd.DataFrame) -> Tuple[float, str]:
         """
         Calculate pattern completion percentage based on current price vs projected D-point.
 
@@ -220,34 +236,50 @@ class PatternTracker:
                 for k, v in data.items():
                     try:
                         patterns[k] = PatternSnapshot.from_dict(v)
+                    except (KeyError, ValueError, TypeError) as e:
+                        logger.warning("Could not load pattern %s (invalid data): %s", k, e)
+                        # Skip corrupted patterns
+                        continue
                     except Exception as e:
-                        print(f"Warning: Could not load pattern {k}: {e}")
+                        logger.warning("Unexpected error loading pattern %s: %s", k, e)
                         # Skip corrupted patterns
                         continue
                 return patterns
-        except Exception as e:
-            print(f"Warning: Could not load active patterns file: {e}")
-            print(f"Starting with empty pattern tracker. Old data preserved as backup.")
+        except json.JSONDecodeError as e:
+            logger.warning("Could not parse active patterns file (invalid JSON): %s", e)
+            logger.info("Starting with empty pattern tracker. Old data preserved as backup.")
             # Backup the corrupted file
             import shutil
             backup_path = self.active_patterns_file.with_suffix('.json.bak')
             try:
                 shutil.copy(self.active_patterns_file, backup_path)
-                print(f"Backup saved to: {backup_path}")
-            except:
-                pass
+                logger.info("Backup saved to: %s", backup_path)
+            except (OSError, IOError) as backup_e:
+                logger.warning("Could not create backup: %s", backup_e)
+            return {}
+        except (OSError, IOError) as e:
+            logger.warning("Could not read active patterns file: %s", e)
+            logger.info("Starting with empty pattern tracker.")
+            return {}
+        except Exception as e:
+            logger.warning("Unexpected error loading active patterns: %s", e)
+            logger.info("Starting with empty pattern tracker.")
             return {}
 
-    def _save_active_patterns(self):
+    def _save_active_patterns(self) -> None:
         """Save active patterns to storage"""
         try:
             data = {k: v.to_dict() for k, v in self.active_patterns.items()}
             with open(self.active_patterns_file, 'w') as f:
                 json.dump(data, f, indent=2)
+        except (OSError, IOError) as e:
+            logger.error("Failed to write active patterns file: %s", e)
+        except (TypeError, ValueError) as e:
+            logger.error("Failed to serialize active patterns (invalid data): %s", e)
         except Exception as e:
-            print(f"Error saving active patterns: {e}")
+            logger.error("Unexpected error saving active patterns: %s", e)
 
-    def _archive_pattern(self, pattern: PatternSnapshot):
+    def _archive_pattern(self, pattern: PatternSnapshot) -> None:
         """Archive completed/invalidated pattern to history"""
         try:
             history = []
@@ -257,14 +289,14 @@ class PatternTracker:
                         history = json.load(f)
                 except json.JSONDecodeError as e:
                     # Corrupted JSON file - backup and start fresh
-                    print(f"Warning: Corrupted history file detected: {e}")
+                    logger.warning("Corrupted history file detected: %s", e)
                     import shutil
                     backup_path = self.history_file.with_suffix(f'.json.corrupt.{datetime.now().strftime("%Y%m%d_%H%M%S")}')
                     try:
                         shutil.copy(self.history_file, backup_path)
-                        print(f"Corrupted history backed up to: {backup_path}")
+                        logger.info("Corrupted history backed up to: %s", backup_path)
                     except Exception as backup_error:
-                        print(f"Could not backup corrupted file: {backup_error}")
+                        logger.error("Could not backup corrupted file: %s", backup_error)
                     # Start with empty history
                     history = []
 
@@ -273,7 +305,7 @@ class PatternTracker:
             with open(self.history_file, 'w') as f:
                 json.dump(history, f, indent=2)
         except Exception as e:
-            print(f"Error archiving pattern: {e}")
+            logger.error("Error archiving pattern: %s", e)
 
     def generate_pattern_id(self, ticker: str, x_date: str, a_date: str,
                            b_date: str, c_date: str, pattern_type: str) -> str:
@@ -292,8 +324,8 @@ class PatternTracker:
         # Use XABC dates only (D can change)
         return f"{ticker}_{pattern_type}_{x_date}_{a_date}_{b_date}_{c_date}"
 
-    def update_patterns(self, ticker: str, detected_patterns: List,
-                       price_data: pd.DataFrame, current_date: datetime) -> Dict:
+    def update_patterns(self, ticker: str, detected_patterns: List[Any],
+                       price_data: pd.DataFrame, current_date: datetime) -> Dict[str, List[PatternSnapshot]]:
         """
         Update pattern states based on newly detected patterns and price action.
 
@@ -314,7 +346,7 @@ class PatternTracker:
                 'completed': [...]          # Targets hit or stopped out
             }
         """
-        results = {
+        results: Dict[str, List[PatternSnapshot]] = {
             'new_patterns': [],
             'watchlist': [],
             'confirmed': [],
@@ -378,7 +410,7 @@ class PatternTracker:
         return results
 
     def _create_new_pattern(self, pattern_id: str, ticker: str,
-                           pattern, price_data: pd.DataFrame,
+                           pattern: Any, price_data: pd.DataFrame,
                            current_timestamp: str) -> PatternSnapshot:
         """Create new pattern snapshot"""
         # Calculate completion percentage based on current price vs D-point
@@ -444,7 +476,7 @@ class PatternTracker:
 
         return snapshot
 
-    def _update_existing_pattern(self, pattern_id: str, pattern,
+    def _update_existing_pattern(self, pattern_id: str, pattern: Any,
                                  price_data: pd.DataFrame,
                                  current_timestamp: str) -> PatternSnapshot:
         """Update existing pattern with new data"""
@@ -466,7 +498,7 @@ class PatternTracker:
             snapshot.entry_locked = True
             snapshot.original_entry_price = pattern.entry_price
             snapshot.original_entry_date = current_timestamp
-            print(f"  🔒 Pattern {pattern_id}: Entry locked at ${pattern.entry_price:.2f}")
+            logger.info("Pattern %s: Entry locked at $%.2f", pattern_id, pattern.entry_price)
 
         # Check if D-point has moved
         old_d_price = snapshot.d_price
@@ -484,13 +516,15 @@ class PatternTracker:
                 if new_d_price < old_d_price:
                     snapshot.d_extended = True
                     snapshot.status = PatternStatus.INVALIDATED.value
-                    print(f"  ⚠️  Pattern {pattern_id}: D-point extended {old_d_price:.2f} → {new_d_price:.2f} (bearish extension in bullish pattern)")
+                    logger.warning("Pattern %s: D-point extended %.2f -> %.2f (bearish extension in bullish pattern)",
+                                 pattern_id, old_d_price, new_d_price)
             else:
                 # For bearish, D should not go higher
                 if new_d_price > old_d_price:
                     snapshot.d_extended = True
                     snapshot.status = PatternStatus.INVALIDATED.value
-                    print(f"  ⚠️  Pattern {pattern_id}: D-point extended {old_d_price:.2f} → {new_d_price:.2f} (bullish extension in bearish pattern)")
+                    logger.warning("Pattern %s: D-point extended %.2f -> %.2f (bullish extension in bearish pattern)",
+                                 pattern_id, old_d_price, new_d_price)
 
         # Update D-point if not extended
         if not snapshot.d_extended:
@@ -514,7 +548,7 @@ class PatternTracker:
 
         return snapshot
 
-    def _analyze_reaction(self, snapshot: PatternSnapshot, price_data: pd.DataFrame):
+    def _analyze_reaction(self, snapshot: PatternSnapshot, price_data: pd.DataFrame) -> None:
         """
         Analyze price reaction after D-point completion.
         Detects Type 1 and Type 2 reactions.
@@ -595,7 +629,7 @@ class PatternTracker:
             if max_favorable >= type1_threshold:
                 snapshot.reaction_type = ReactionType.TYPE_1.value
                 snapshot.status = PatternStatus.CONFIRMED_TYPE1.value
-                print(f"  ✓ Type 1 Reaction detected for {snapshot.pattern_id}: {max_favorable:.2f} move from D")
+                logger.info("Type 1 Reaction detected for %s: %.2f move from D", snapshot.pattern_id, max_favorable)
                 return
 
             # Check for Type 2 reaction (retest of PRZ)
@@ -613,7 +647,7 @@ class PatternTracker:
                     if moved_up and came_back and reversed_again:
                         snapshot.reaction_type = ReactionType.TYPE_2.value
                         snapshot.status = PatternStatus.CONFIRMED_TYPE2.value
-                        print(f"  ✓ Type 2 Reaction detected for {snapshot.pattern_id}: retest and reversal")
+                        logger.info("Type 2 Reaction detected for %s: retest and reversal", snapshot.pattern_id)
                         return
                 else:
                     moved_down = (snapshot.d_price - after_d[low_col]).max() > type1_threshold * 0.5
@@ -623,17 +657,22 @@ class PatternTracker:
                     if moved_down and came_back and reversed_again:
                         snapshot.reaction_type = ReactionType.TYPE_2.value
                         snapshot.status = PatternStatus.CONFIRMED_TYPE2.value
-                        print(f"  ✓ Type 2 Reaction detected for {snapshot.pattern_id}: retest and reversal")
+                        logger.info("Type 2 Reaction detected for %s: retest and reversal", snapshot.pattern_id)
                         return
 
             # No clear reaction yet
             snapshot.status = PatternStatus.AWAITING_CONFIRMATION.value
 
+        except (KeyError, ValueError, IndexError) as e:
+            # Expected errors from data access/calculation
+            logger.debug("Data error analyzing reaction for %s: %s", snapshot.pattern_id, e)
+            snapshot.status = PatternStatus.AWAITING_CONFIRMATION.value
         except Exception as e:
-            print(f"Error analyzing reaction for {snapshot.pattern_id}: {e}")
+            # Unexpected errors
+            logger.error("Unexpected error analyzing reaction for %s: %s", snapshot.pattern_id, e, exc_info=True)
             snapshot.status = PatternStatus.AWAITING_CONFIRMATION.value
 
-    def _check_expired_patterns(self, current_date: datetime, results: Dict):
+    def _check_expired_patterns(self, current_date: datetime, results: Dict[str, List[PatternSnapshot]]) -> None:
         """Check for patterns that have expired (too old)"""
         expired_ids = []
 
@@ -646,7 +685,7 @@ class PatternTracker:
                 results['completed'].append(snapshot)
                 self._archive_pattern(snapshot)
                 expired_ids.append(pattern_id)
-                print(f"  ⏳ Pattern {pattern_id} expired ({days_old} days old)")
+                logger.info("Pattern %s expired (%d days old)", pattern_id, days_old)
 
         # Remove expired patterns
         for pattern_id in expired_ids:
@@ -674,9 +713,9 @@ class PatternTracker:
 
         return patterns
 
-    def get_summary(self) -> Dict:
+    def get_summary(self) -> Dict[str, Any]:
         """Get summary statistics of tracked patterns"""
-        summary = {
+        summary: Dict[str, Any] = {
             'total_active': len(self.active_patterns),
             'by_status': {},
             'by_ticker': {},
@@ -687,16 +726,18 @@ class PatternTracker:
         for snapshot in self.active_patterns.values():
             # Count by status
             status = snapshot.status
-            summary['by_status'][status] = summary['by_status'].get(status, 0) + 1
+            by_status: Dict[str, int] = summary['by_status']
+            by_status[status] = by_status.get(status, 0) + 1
 
             # Count by ticker
             ticker = snapshot.ticker
-            summary['by_ticker'][ticker] = summary['by_ticker'].get(ticker, 0) + 1
+            by_ticker: Dict[str, int] = summary['by_ticker']
+            by_ticker[ticker] = by_ticker.get(ticker, 0) + 1
 
             # Special counts
             if status in [PatternStatus.CONFIRMED_TYPE1.value, PatternStatus.CONFIRMED_TYPE2.value]:
-                summary['confirmed_count'] += 1
+                summary['confirmed_count'] = summary['confirmed_count'] + 1  # type: ignore
             elif status == PatternStatus.AWAITING_CONFIRMATION.value:
-                summary['awaiting_confirmation'] += 1
+                summary['awaiting_confirmation'] = summary['awaiting_confirmation'] + 1  # type: ignore
 
         return summary

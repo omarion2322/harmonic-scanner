@@ -6,31 +6,62 @@ Usage:
     python harmonic_scanner.py
 """
 
-# Print early to show scanner is loading
-print("Loading harmonic pattern scanner modules...")
-
 import yfinance as yf
 import pandas as pd
 from datetime import datetime
 import warnings
-from typing import List, Dict
+from typing import List, Dict, Optional, Any
 import time
 
 from pattern_detector import PatternDetector
 from reaction_detector import ReactionDetector
 from data_downloader import download_stock_data
+from crypto_data_downloader import download_crypto_data
 from pattern_tracker import PatternTracker, PatternStatus
 from utils import ConfigHelper, PathManager, FormattingUtils, TickerManager
+from logging_config import get_logger
+from scanner_helpers import (
+    ScanProgressTracker,
+    FailedDownloadRetrier,
+    PatternTrackerUpdater,
+    ScanResultsFormatter
+)
+
+logger = get_logger(__name__)
+
+
+def smart_download_data(ticker: str, **kwargs) -> pd.DataFrame:
+    """
+    Smart data downloader that automatically selects the right source.
+
+    - Crypto tickers (ending with -USD): Uses crypto_data_downloader with cascading fallbacks
+    - Stock tickers: Uses regular data_downloader
+
+    Args:
+        ticker: Ticker symbol
+        **kwargs: Additional arguments passed to the downloader
+
+    Returns:
+        DataFrame with OHLCV data
+    """
+    # Detect crypto tickers (end with -USD and not a stock)
+    # Most stocks don't end with -USD, this is a crypto pattern
+    if ticker.endswith('-USD'):
+        # Use crypto downloader with cascading fallbacks
+        return download_crypto_data(ticker=ticker, **kwargs)
+    else:
+        # Use regular stock downloader
+        return download_stock_data(ticker=ticker, **kwargs)
 
 warnings.filterwarnings('ignore')
 
-print("✓ Modules loaded successfully")
+logger.info("Modules loaded successfully")
 
 # Import configuration
 try:
-    import config
+    import config  # type: ignore
 except ImportError:
-    class config:
+    class config:  # type: ignore
         MAX_STOCKS_TO_SCAN = 50
         MAX_DAYS_SINCE_PATTERN = 10
 
@@ -50,7 +81,7 @@ class HarmonicScanner:
     - Pattern quality assessment
     """
 
-    def __init__(self):
+    def __init__(self, asset_type: str = 'stocks') -> None:
         self.detector = PatternDetector()  # Uses Carney's exact specifications
         self.reaction_detector = ReactionDetector()  # Type 1 and Type 2 reaction detection
         self.tracker = PatternTracker(storage_dir="./pattern_tracking")  # Pattern state tracking
@@ -58,6 +89,7 @@ class HarmonicScanner:
         # Initialize utility helpers
         self.config_helper = ConfigHelper(config)
         self.path_manager = PathManager()
+        self.asset_type = asset_type  # 'stocks' or 'crypto' - determines report directory
 
     def get_sp500_tickers(self) -> List[str]:
         """
@@ -78,7 +110,7 @@ class HarmonicScanner:
                 sp500_tickers = df['Symbol'].tolist()
                 sp500_tickers = [str(ticker).strip().replace('.', '-') for ticker in sp500_tickers
                           if pd.notna(ticker)]
-                print(f"✓ Successfully fetched {len(sp500_tickers)} S&P 500 tickers from SlickCharts")
+                logger.info("Successfully fetched %d S&P 500 tickers from SlickCharts", len(sp500_tickers))
 
                 # Merge custom tickers with S&P 500 using TickerManager
                 custom_tickers = self.config_helper.get('STOCK_TICKERS')
@@ -89,9 +121,15 @@ class HarmonicScanner:
             else:
                 raise Exception("Symbol column not found")
 
+        except (ValueError, pd.errors.ParserError) as e:
+            logger.error("Error parsing S&P 500 list from SlickCharts: %s", e)
+            logger.info("Using fallback list of major stocks")
+        except (OSError, IOError) as e:
+            logger.error("Network error fetching S&P 500 list from SlickCharts: %s", e)
+            logger.info("Using fallback list of major stocks")
         except Exception as e:
-            print(f"Error fetching S&P 500 list from SlickCharts: {e}")
-            print("Using fallback list of major stocks...")
+            logger.error("Unexpected error fetching S&P 500 list from SlickCharts: %s", e)
+            logger.info("Using fallback list of major stocks")
 
             # Fallback list of major stocks
             fallback_sp500 = [
@@ -110,7 +148,7 @@ class HarmonicScanner:
 
             return fallback_tickers
 
-    def scan_stock(self, ticker: str, verbose: bool = None, override_period: str = None) -> Dict:
+    def scan_stock(self, ticker: str, verbose: Optional[bool] = None, override_period: Optional[str] = None) -> Dict[str, Any]:
         """
         Scan a single stock for harmonic patterns using hybrid detector.
 
@@ -140,8 +178,8 @@ class HarmonicScanner:
             download_delay = self.config_helper.get_float('DOWNLOAD_DELAY', 0.1)
 
             # Use auto_adjust=False to get actual NYSE trading prices (not dividend-adjusted)
-            # download_stock_data includes retry logic with exponential backoff
-            df = download_stock_data(
+            # smart_download_data automatically uses crypto downloader for -USD tickers
+            df = smart_download_data(
                 ticker=ticker,
                 period=data_period,
                 interval=data_interval,
@@ -216,7 +254,7 @@ class HarmonicScanner:
                 reaction_data = self.reaction_detector.detect_reaction(df, latest_pattern, current_idx)
 
                 # Get chart directory using PathManager
-                chart_dir = str(self.path_manager.get_chart_dir(interval=data_interval))
+                chart_dir = str(self.path_manager.get_chart_dir(interval=data_interval, asset_type=self.asset_type))
 
                 # Generate pattern chart
                 try:
@@ -225,8 +263,14 @@ class HarmonicScanner:
                         interval=data_interval, reaction_data=reaction_data
                     )
                     latest_pattern.chart_path = chart_path
+                except (OSError, IOError) as e:
+                    logger.warning("Could not save chart for %s: %s", ticker, e)
+                    chart_path = None
+                except ValueError as e:
+                    logger.warning("Invalid chart data for %s: %s", ticker, e)
+                    chart_path = None
                 except Exception as e:
-                    print(f"Warning: Could not generate chart for {ticker}: {e}")
+                    logger.warning("Unexpected error generating chart for %s: %s", ticker, e)
                     chart_path = None
 
             return {
@@ -239,7 +283,19 @@ class HarmonicScanner:
                 'reaction_data': reaction_data
             }
 
+        except (ValueError, KeyError) as e:
+            # Data-related errors
+            logger.debug("Data error analyzing %s: %s", ticker, e)
+            return {
+                'ticker': ticker,
+                'signal': 'HOLD',
+                'reason': f'Data error: {str(e)}',
+                'patterns': [],
+                'chart_path': None
+            }
         except Exception as e:
+            # Unexpected errors
+            logger.warning("Unexpected error analyzing %s: %s", ticker, e, exc_info=True)
             return {
                 'ticker': ticker,
                 'signal': 'HOLD',
@@ -248,7 +304,7 @@ class HarmonicScanner:
                 'chart_path': None
             }
 
-    def run_scan(self, max_stocks: int = None) -> Dict[str, List[Dict]]:
+    def run_scan(self, max_stocks: Optional[int] = None) -> Dict[str, List[Dict[str, Any]]]:
         """
         Scan S&P 500 stocks for harmonic patterns.
 
@@ -258,15 +314,46 @@ class HarmonicScanner:
         Returns:
             Dictionary with BUY, SELL, HOLD lists
         """
-        print("="*80)
-        print("IMPROVED HARMONIC PATTERN SCANNER")
-        print("Pyharmonics Peak Detection + Scott Carney's Exact Rules (Volumes 1-3)")
-        print("="*80)
-        print()
-        print("="*80)
-        config.get_settings_summary()
+        # Step 1: Print header and get ticker list
+        ScanResultsFormatter.print_header(config)
+        tickers = self._get_ticker_list(max_stocks)
 
-        # Get ticker list using new stock universe system (respects STOCKS_TO_SCAN config)
+        logger.info("Scanning %d stocks for harmonic patterns...", len(tickers))
+        logger.info("This may take several minutes...")
+        logger.info("")
+
+        # Step 2: Initialize tracking
+        results: Dict[str, List[Dict[str, Any]]] = {'BUY': [], 'SELL': [], 'HOLD': []}
+        progress = ScanProgressTracker(len(tickers), report_interval=10)
+        tracker_updater = PatternTrackerUpdater(self.tracker, self.detector, self.config_helper)
+
+        # Step 3: Scan all tickers
+        self._scan_all_tickers(tickers, results, progress, tracker_updater)
+
+        # Step 4: Retry failures
+        self._retry_failures(results)
+
+        # Step 5: Print summary
+        tracked_stats = tracker_updater.get_stats()
+        ScanResultsFormatter.print_summary(results, tracked_stats)
+
+        # Store tracker summary in results for report generation
+        results['_tracker_summary'] = self.tracker.get_summary()  # type: ignore
+        results['_tracked_stats'] = tracked_stats  # type: ignore
+
+        return results
+
+    def _get_ticker_list(self, max_stocks: Optional[int]) -> List[str]:
+        """
+        Get the list of tickers to scan.
+
+        Args:
+            max_stocks: Maximum number of stocks to scan
+
+        Returns:
+            List of ticker symbols
+        """
+        # Get ticker list using new stock universe system
         tickers = config.get_stock_list()
 
         # Merge custom tickers with universe using TickerManager
@@ -274,171 +361,85 @@ class HarmonicScanner:
         tickers = TickerManager.merge_ticker_lists(custom_tickers, tickers)
         TickerManager.print_custom_ticker_info(custom_tickers)
 
-        print(f"Total tickers to scan: {len(tickers)}")
+        logger.info("Total tickers to scan: %d", len(tickers))
 
         if max_stocks:
             tickers = tickers[:max_stocks]
 
+        return tickers
 
-        print(f"Scanning {len(tickers)} stocks for harmonic patterns...")
-        print("This may take several minutes...")
-        print()
+    def _scan_all_tickers(
+        self,
+        tickers: List[str],
+        results: Dict[str, List[Dict[str, Any]]],
+        progress: ScanProgressTracker,
+        tracker_updater: PatternTrackerUpdater
+    ) -> None:
+        """
+        Scan all tickers with progress tracking and pattern tracker updates.
 
-        results = {'BUY': [], 'SELL': [], 'HOLD': []}
-        failed_tickers = []  # Track failed downloads for retry
-
-        # Track patterns across scans
-        tracked_stats = {
-            'confirmed': 0,
-            'watchlist': 0,
-            'invalidated': 0
-        }
+        Args:
+            tickers: List of ticker symbols
+            results: Results dictionary to populate
+            progress: Progress tracker
+            tracker_updater: Pattern tracker updater
+        """
+        verbose = self.config_helper.get_bool('VERBOSE_REPORTS', False)
 
         for i, ticker in enumerate(tickers, 1):
-            # Progress update every 10 stocks
-            if i % 10 == 0:
-                print(f"Progress: {i}/{len(tickers)} stocks analyzed...")
+            # Update progress
+            progress.update(i, ticker)
 
-            # Use verbose mode from config
-            verbose = self.config_helper.get_bool('VERBOSE_REPORTS', False)
+            # Scan ticker
             analysis = self.scan_stock(ticker, verbose=verbose)
-
-            # Track download failures for retry
-            is_no_data = analysis['signal'] == 'HOLD' and 'No data available' in analysis['reason']
-            is_error = analysis['signal'] == 'HOLD' and 'Error analyzing stock' in analysis['reason']
-
-            # Only retry if download actually failed (no data returned)
-            download_failed = is_no_data or is_error
-            if download_failed:
-                failed_tickers.append(ticker)
-
             results[analysis['signal']].append(analysis)
 
-            # Update pattern tracker with completed AND forming patterns
-            # Skip if initial download already failed to avoid duplicate download attempts
-            if not download_failed:
-                try:
-                    from pyharmonics import OHLCTechnicals as Technicals
-                    from pyharmonics.search import HarmonicSearch
+            # Update pattern tracker (if download succeeded)
+            if not self._is_download_failure(analysis):
+                tracker_updater.update_for_ticker(
+                    ticker,
+                    analysis.get('patterns', []),
+                    None,  # df not needed, updater will download
+                    smart_download_data
+                )
 
-                    # Download with retry logic (same as main download)
-                    data_interval = self.config_helper.get('DATA_INTERVAL', '1wk')
-                    data_period = self.config_helper.get('DATA_PERIOD', '2y')
-                    max_retries = self.config_helper.get_int('MAX_DOWNLOAD_RETRIES', 3)
-
-                    df = download_stock_data(
-                        ticker=ticker,
-                        period=data_period,
-                        interval=data_interval,
-                        auto_adjust=False,
-                        max_retries=max_retries
-                    )
-
-                    if not df.empty:
-                        df.columns = [c.lower() for c in df.columns]
-
-                        # Collect all patterns (completed + forming)
-                        all_patterns = []
-
-                        # Add completed patterns from analysis
-                        if analysis.get('patterns'):
-                            all_patterns.extend(analysis['patterns'])
-
-                        # Detect forming patterns (85-100% complete)
-                        try:
-                            swing_window = self.config_helper.get_int('SWING_WINDOW', 3)
-                            tech = Technicals(df, ticker, data_interval, peak_spacing=swing_window)
-                            fib_tolerance = self.config_helper.get_float('PYHARMONICS_FIB_TOLERANCE', 0.03)
-                            h = HarmonicSearch(tech, fib_tolerance=fib_tolerance, check_anchor=True)
-
-                            # Detect patterns 85% complete
-                            h.forming(limit_to=10, percent_c_to_d=0.95)
-                            forming = h.get_patterns(family=h.XABCD, formed=False)
-
-                            # Convert forming patterns to HarmonicPattern objects
-                            for py_pattern in forming.get(h.XABCD, []):
-                                converted = self.detector._convert_pyharmonics_pattern(
-                                    py_pattern, df, tech, fib_tolerance, ticker
-                                )
-                                if converted:
-                                    all_patterns.append(converted)
-
-                        except Exception as e:
-                            if verbose:
-                                print(f"  Warning: Could not detect forming patterns for {ticker}: {e}")
-
-                        # Update tracker with all patterns
-                        if all_patterns:
-                            current_date = datetime.now()
-                            tracked = self.tracker.update_patterns(
-                                ticker=ticker,
-                                detected_patterns=all_patterns,
-                                price_data=df,
-                                current_date=current_date
-                            )
-
-                            # Update stats
-                            tracked_stats['confirmed'] += len(tracked.get('confirmed', []))
-                            tracked_stats['watchlist'] += len(tracked.get('watchlist', []))
-                            tracked_stats['invalidated'] += len(tracked.get('invalidated', []))
-
-                except Exception as e:
-                    if verbose:
-                        print(f"  Warning: Could not update tracker for {ticker}: {e}")
-
-            # Small delay to avoid rate limiting (from config)
+            # Rate limiting delay
             delay = self.config_helper.get_float('DOWNLOAD_DELAY', 0.1)
             if delay > 0:
                 time.sleep(delay)
 
-        # Retry failed downloads (genuine download failures only)
+    def _retry_failures(self, results: Dict[str, List[Dict[str, Any]]]) -> None:
+        """
+        Retry failed downloads with fallback period.
+
+        Args:
+            results: Results dictionary to update
+        """
+        retrier = FailedDownloadRetrier(self, fallback_period='max', max_retries=1)
+        failed_tickers = retrier.identify_failed_tickers(results)
+
         if failed_tickers:
-            print()
-            print(f"Retrying {len(failed_tickers)} tickers with download failures...")
+            logger.info("")
+            retrier.retry_failed(failed_tickers, results)
 
-            success_count = 0
-            for ticker in failed_tickers:
-                # Try one fallback period (max history available)
-                retry_analysis = self.scan_stock(ticker, verbose=False, override_period='max')
+    @staticmethod
+    def _is_download_failure(analysis: Dict[str, Any]) -> bool:
+        """
+        Check if analysis represents a download failure.
 
-                # Check if retry succeeded (not a HOLD with download failure)
-                is_still_failed = (retry_analysis['signal'] == 'HOLD' and
-                                  ('No data available' in retry_analysis['reason'] or
-                                   'Error analyzing stock' in retry_analysis['reason']))
+        Args:
+            analysis: Analysis dictionary
 
-                if not is_still_failed:
-                    # Success - update results
-                    results['HOLD'] = [r for r in results['HOLD'] if r['ticker'] != ticker]
-                    results[retry_analysis['signal']].append(retry_analysis)
-                    print(f"  ✓ {ticker}: Retry succeeded")
-                    success_count += 1
-                # No message for failures - ticker stays in original HOLD results
+        Returns:
+            True if download failed
+        """
+        return (
+            analysis['signal'] == 'HOLD' and
+            ('No data available' in analysis.get('reason', '') or
+             'Error analyzing stock' in analysis.get('reason', ''))
+        )
 
-            if success_count > 0:
-                print(f"Retry summary: {success_count}/{len(failed_tickers)} succeeded")
-            print()
-
-        print()
-        print("="*80)
-        print("SCAN COMPLETE")
-        print("="*80)
-        print(f"BUY signals: {len(results['BUY'])}")
-        print(f"SELL signals: {len(results['SELL'])}")
-        print(f"HOLD signals: {len(results['HOLD'])}")
-        print()
-        print("PATTERN TRACKING:")
-        print(f"Confirmed patterns (Type 1/2): {tracked_stats['confirmed']}")
-        print(f"Watchlist (forming patterns): {tracked_stats['watchlist']}")
-        print(f"Invalidated (D extended): {tracked_stats['invalidated']}")
-        print()
-
-        # Store tracker summary in results for report generation
-        results['_tracker_summary'] = self.tracker.get_summary()
-        results['_tracked_stats'] = tracked_stats
-
-        return results
-
-    def generate_report(self, results: Dict[str, List[Dict]]) -> str:
+    def generate_report(self, results: Dict[str, List[Dict[str, Any]]]) -> str:
         """
         Generate formatted report from scan results.
 
@@ -466,13 +467,13 @@ class HarmonicScanner:
         report_lines.append(f"HOLD Signals: {len(results['HOLD'])}")
 
         # Add tracker stats if available
-        tracked_stats = results.get('_tracked_stats', {})
-        if tracked_stats:
+        tracked_stats_value: Any = results.get('_tracked_stats', {})
+        if tracked_stats_value and isinstance(tracked_stats_value, dict):
             report_lines.append("")
             report_lines.append("Pattern Tracking:")
-            report_lines.append(f"  Confirmed (Type 1/2 Reactions): {tracked_stats.get('confirmed', 0)}")
-            report_lines.append(f"  Watchlist (Forming Patterns): {tracked_stats.get('watchlist', 0)}")
-            report_lines.append(f"  Invalidated (D Extended): {tracked_stats.get('invalidated', 0)}")
+            report_lines.append(f"  Confirmed (Type 1/2 Reactions): {tracked_stats_value.get('confirmed', 0)}")
+            report_lines.append(f"  Watchlist (Forming Patterns): {tracked_stats_value.get('watchlist', 0)}")
+            report_lines.append(f"  Invalidated (D Extended): {tracked_stats_value.get('invalidated', 0)}")
 
         report_lines.append("")
 
@@ -610,7 +611,7 @@ class HarmonicScanner:
                 report_lines.append("")
 
         # MONITORING - Patterns approaching D point (forming patterns)
-        tracker_summary = results.get('_tracker_summary', {})
+        tracker_summary: Dict[str, Any] = results.get('_tracker_summary', {})  # type: ignore
         if tracker_summary:
             # Get watchlist (forming patterns - haven't reached D point yet)
             watchlist = self.tracker.get_active_patterns(status=PatternStatus.FORMING)
@@ -671,7 +672,7 @@ class HarmonicScanner:
 
         return "\n".join(report_lines)
 
-    def save_report(self, report: str):
+    def save_report(self, report: str) -> str:
         """Save report to file in reports/<date>/ directory"""
         # Get configuration values using ConfigHelper
         data_interval = self.config_helper.get('DATA_INTERVAL', '1d')
@@ -680,17 +681,18 @@ class HarmonicScanner:
         # Get report path using PathManager
         report_path = self.path_manager.get_report_path(
             interval=data_interval,
-            verbose=verbose
+            verbose=verbose,
+            asset_type=self.asset_type
         )
 
         with open(report_path, 'w') as f:
             f.write(report)
 
-        print(f"✓ Report saved to: {report_path}")
+        logger.info("Report saved to: %s", report_path)
         return report_path
 
 
-def main():
+def main() -> None:
     """Main entry point"""
     scanner = HarmonicScanner()
 

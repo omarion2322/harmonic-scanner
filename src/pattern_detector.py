@@ -5,7 +5,7 @@ Uses Pyharmonics peak detection with Scott Carney's exact trading rules from Vol
 
 import pandas as pd
 import numpy as np
-from typing import List, Optional, Tuple, Dict
+from typing import List, Optional, Tuple, Dict, Any
 from dataclasses import dataclass
 from pyharmonics import OHLCTechnicals as Technicals
 from pyharmonics.search import HarmonicSearch
@@ -22,15 +22,24 @@ import os
 
 # Import config for SWING_WINDOW
 try:
-    import config
+    import config  # type: ignore
 except ImportError:
-    class config:
+    class config:  # type: ignore
         SWING_WINDOW = 3  # Default for weekly data
         TP_STRATEGY = 'SCOTT'  # Default strategy
 
 # Import TP strategies
 from tp_strategies import ScottStrategy, MitchStrategy, PositionStrategy, TPStrategy
 from utils import ConfigHelper
+from logging_config import get_logger
+from chart_generator import ChartGenerator
+from exceptions import (
+    PatternConversionError,
+    PatternValidationError,
+    TemporalValidationError
+)
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -107,7 +116,7 @@ class PatternDetector:
     - All 9 harmonic patterns: Gartley, Bat, Alternate Bat, Butterfly, Crab, Deep Crab, Cypher, Shark, 5-0
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialize detector with Carney's exact specifications"""
         self.patterns = CARNEY_PATTERNS
         self.pattern_priority = [
@@ -117,6 +126,7 @@ class PatternDetector:
         ]
         self._tp_strategy_cache = None  # Cache the strategy instance
         self.config_helper = ConfigHelper(config)  # Configuration helper
+        self.chart_generator = ChartGenerator(dpi=150)  # Chart generator
 
     def _get_tp_strategy(self) -> TPStrategy:
         """
@@ -195,12 +205,15 @@ class PatternDetector:
 
         # Show summary if patterns were rejected
         verbose = self.config_helper.get_bool('VERBOSE_REPORTS', False)
-        if rejected_count > 0 and verbose:
-            print(f"  {symbol}: {rejected_count} pattern(s) rejected (invalid duration)")
+        if rejected_count > 0:
+            # Always log rejections at DEBUG level for troubleshooting
+            logger.debug("%s: %d pattern(s) rejected (invalid duration)", symbol, rejected_count)
+            if verbose:
+                logger.info("%s: %d pattern(s) rejected (invalid duration)", symbol, rejected_count)
 
         return detected_patterns
 
-    def _convert_pyharmonics_pattern(self, py_pattern, df: pd.DataFrame, tech: Technicals, fib_tolerance: float, symbol: str) -> Optional[HarmonicPattern]:
+    def _convert_pyharmonics_pattern(self, py_pattern: Any, df: pd.DataFrame, tech: Technicals, fib_tolerance: float, symbol: str) -> Optional[HarmonicPattern]:
         """
         Convert pyharmonics XABCDPattern to our HarmonicPattern format with trading specs.
 
@@ -213,6 +226,75 @@ class PatternDetector:
 
         Returns:
             HarmonicPattern with Carney trading specs, or None if conversion fails
+        """
+        try:
+            # Step 1: Extract XABCD points
+            points = self._extract_pattern_points(py_pattern, df)
+            if not points:
+                return None
+
+            # Step 2: Validate temporal proportionality
+            is_valid, reason = self._validate_temporal_proportionality(
+                points['x'].date, points['a'].date, points['b'].date,
+                points['c'].date, points['d'].date
+            )
+            if not is_valid:
+                return None
+
+            # Step 3: Calculate Fibonacci ratios
+            ratios = self._calculate_fibonacci_ratios(py_pattern)
+
+            # Step 4: Get pattern specification and calculate trading specs
+            pattern_spec = self._get_pattern_specification(py_pattern)
+            if not pattern_spec:
+                return None
+
+            trading_specs = self._calculate_trading_specifications(
+                points, ratios, pattern_spec, df, symbol
+            )
+
+            # Step 5: Calculate pattern grade
+            grade = self._calculate_pyharmonics_grade(
+                ratios['ab_xa'], ratios['ad_xa'], ratios['bc_projection'],
+                pattern_spec, fib_tolerance,
+                points['x'].price, points['a'].price, points['b'].price,
+                points['c'].price, points['d'].price,
+                points['x'].date, points['a'].date, points['b'].date,
+                points['c'].date, points['d'].date
+            )
+
+            # Step 6: Create HarmonicPattern object
+            return self._create_harmonic_pattern(
+                points, ratios, pattern_spec, trading_specs, grade, fib_tolerance
+            )
+
+        except PatternConversionError as e:
+            logger.debug("[%s] Pattern conversion failed for %s: %s", symbol, py_pattern.name, e)
+            return None
+        except (PatternValidationError, TemporalValidationError) as e:
+            logger.debug("[%s] Pattern validation failed for %s: %s", symbol, py_pattern.name, e)
+            return None
+        except (ValueError, KeyError, AttributeError) as e:
+            # Expected errors from pyharmonics data access
+            logger.debug("[%s] Invalid pattern data for %s: %s", symbol, py_pattern.name, e)
+            return None
+        except Exception as e:
+            # Truly unexpected errors - convert to PatternConversionError with chaining
+            logger.warning("[%s] Unexpected error converting pyharmonics pattern %s: %s", symbol, py_pattern.name, e)
+            raise PatternConversionError(
+                f"Unexpected error converting {py_pattern.name}", ticker=symbol
+            ) from e
+
+    def _extract_pattern_points(self, py_pattern: Any, df: pd.DataFrame) -> Optional[Dict[str, Point]]:
+        """
+        Extract XABCD points from pyharmonics pattern.
+
+        Args:
+            py_pattern: pyharmonics XABCDPattern object
+            df: Price dataframe
+
+        Returns:
+            Dictionary of points {'x': Point, 'a': Point, ...}, or None if extraction fails
         """
         try:
             # Extract X, A, B, C, D points from pyharmonics pattern
@@ -240,200 +322,280 @@ class PatternDetector:
             d_point = Point(index=4, price=d_price, date=d_ts,
                           swing_type='TROUGH' if is_bullish else 'PEAK')
 
-            # Validate temporal proportionality
-            is_temporally_valid, temporal_reason = self._validate_temporal_proportionality(
-                x_ts, a_ts, b_ts, c_ts, d_ts
-            )
-
-            if not is_temporally_valid:
-                # Silently reject - will be summarized at ticker level
-                return None  # Reject pattern with invalid duration
-
-            # Use Fibonacci ratios from pyharmonics (trust their calculations)
-            # py_pattern.retraces contains:
-            #   'XAB'   = AB/XA ratio (B-point)
-            #   'ABC'   = BC/AB ratio (C-point retracement)
-            #   'BCD'   = CD/BC ratio (BC projection)
-            #   'XABCD' = XD/XA ratio (D-point completion)
-            from pyharmonics import constants
-
-            ab_xa = py_pattern.retraces.get(constants.XAB, 0)
-            bc_ab = py_pattern.retraces.get(constants.ABC, 0)
-            bc_projection = py_pattern.retraces.get(constants.BCD, 0)
-            cd_bc = bc_projection  # Same as BCD
-            ad_xa = py_pattern.retraces.get(constants.XABCD, 0)
-
-            # Calculate XA range for stop loss calculations
-            xa_range = abs(a_price - x_price)
-
-            # Map pyharmonics pattern names to our format
-            pattern_name_map = {
-                'bat': 'bat',
-                'alt bat': 'alternate_bat',
-                'gartley': 'gartley',
-                'butterfly': 'butterfly',
-                'crab': 'crab',
-                'deep crab': 'deep_crab',
-                'cypher': 'cypher',
-                'shark': 'shark',
-                'deep shark': '5_0',  # Map deep shark to 5-0 pattern
+            return {
+                'x': x_point,
+                'a': a_point,
+                'b': b_point,
+                'c': c_point,
+                'd': d_point,
+                'is_bullish': is_bullish
             }
-            pattern_type = pattern_name_map.get(py_pattern.name.lower(), py_pattern.name.lower())
 
-            # Get pattern spec for Carney trading rules
-            pattern_spec = get_pattern_spec(pattern_type)
-            if not pattern_spec:
-                return None  # Unknown pattern type
-
-            # Calculate Carney trading specifications
-            # Entry price at point D
-            entry_price = d_price
-
-            # Calculate PRZ levels
-            prz_levels = calculate_prz_levels(x_price, a_price, b_price, c_price, pattern_spec)
-
-            # Calculate D-point range (PRZ boundaries) around the actual detected D-point
-            # The PRZ is a zone, not a single price - entries anywhere in this zone are valid
-            # Use 2% tolerance as standard PRZ zone width (configurable)
-            prz_tolerance_pct = self.config_helper.get_float('PRZ_TOLERANCE_PCT', 0.02)
-
-            # Calculate the range centered on the detected D-point
-            d_point_range_min = d_price * (1 - prz_tolerance_pct)
-            d_point_range_max = d_price * (1 + prz_tolerance_pct)
-
-            # Stop loss using Carney's pattern-specific ratio
-            stop_loss = calculate_stop_loss(pattern_spec, x_price, xa_range, is_bullish)
-
-            # I.P.O. profit targets (from D to A reversal distance)
-            if is_bullish:
-                pattern_low = d_price
-                pattern_high = a_price
-            else:
-                pattern_high = d_price
-                pattern_low = a_price
-
-            # Get TP targets using selected strategy
-            tp_strategy = self._get_tp_strategy()
-
-            # Find d_index in dataframe for strategy context
-            try:
-                d_index = df.index.get_loc(df.index[df.index >= d_ts][0])
-            except (IndexError, KeyError):
-                d_index = len(df) - 1  # Fallback to last index
-
-            # Calculate targets using strategy
-            tp_targets = tp_strategy.calculate_targets(
-                pattern_high=pattern_high,
-                pattern_low=pattern_low,
-                is_bullish=is_bullish,
-                price_data=df,
-                x_price=x_price,
-                a_price=a_price,
-                b_price=b_price,
-                c_price=c_price,
-                d_price=d_price,
-                d_index=d_index,
-                ticker=symbol
-            )
-
-            ipo_target_1 = tp_targets.primary
-            ipo_target_2 = tp_targets.secondary
-            target_point_a = tp_targets.final if tp_targets.final else a_price
-            tp_strategy_used = tp_targets.tp_strategy_used if hasattr(tp_targets, 'tp_strategy_used') else ""
-
-            # Check if TP strategy has custom stop loss calculation
-            max_allowed_stop_loss_pct = self.config_helper.get_float('MAX_ALLOWED_STOP_LOSS_PCT', 10.0)
-            min_allowed_stop_loss_pct = self.config_helper.get_float('MIN_ALLOWED_STOP_LOSS_PCT', 3.0)
-            strategy_stop_loss = tp_strategy.calculate_stop_loss(
-                pattern_high=pattern_high,
-                pattern_low=pattern_low,
-                is_bullish=is_bullish,
-                price_data=df,
-                x_price=x_price,
-                a_price=a_price,
-                b_price=b_price,
-                c_price=c_price,
-                d_price=d_price,
-                d_index=d_index,
-                max_allowed_stop_loss_pct=max_allowed_stop_loss_pct,
-                min_allowed_stop_loss_pct=min_allowed_stop_loss_pct
-            )
-
-            # Use strategy's stop loss if provided, otherwise keep Carney's
-            if strategy_stop_loss is not None:
-                stop_loss = strategy_stop_loss
-
-            # Risk/Reward calculation using WEIGHTED average based on position sizing
-            # Uses position sizing from config to ensure consistency with P&L calculations
-            # This gives a more accurate R/R that reflects actual trade potential
-            risk = abs(entry_price - stop_loss)
-            reward_t1 = abs(ipo_target_1 - entry_price)
-            reward_t2 = abs(ipo_target_2 - entry_price)
-            reward_t3 = abs(target_point_a - entry_price)
-            # Weighted average reward using config position sizing
-            weighted_reward = (reward_t1 * config.POSITION_SIZE_T1) + \
-                            (reward_t2 * config.POSITION_SIZE_T2) + \
-                            (reward_t3 * config.POSITION_SIZE_T3)
-            risk_reward = weighted_reward / risk if risk > 0 else 0
-
-            # Pattern quality assessment - REMOVED
-            # pattern_quality = self._assess_pattern_quality(
-            #     ab_xa, pattern_spec.b_point_min, pattern_spec.b_point_max,
-            #     bc_projection, pattern_spec.bc_projection_min, pattern_spec.bc_projection_max
-            # )
-
-            # For pyharmonics patterns, tolerance_level shows the fib_tolerance as percentage
-            tolerance_level = f"{fib_tolerance*100:.1f}%"
-
-            # Calculate refined grade based on Scott Carney's hierarchy
-            # D-point accuracy (45%), PRZ convergence, and time symmetry
-            grade = self._calculate_pyharmonics_grade(
-                ab_xa, ad_xa, bc_projection, pattern_spec, fib_tolerance,
-                x_price, a_price, b_price, c_price, d_price,
-                x_ts, a_ts, b_ts, c_ts, d_ts
-            )
-
-            # Determine trade quality tier based on grade
-            trade_quality = self._get_trade_quality(grade)
-
-            # Create HarmonicPattern object
-            return HarmonicPattern(
-                x=x_point, a=a_point, b=b_point, c=c_point, d=d_point,
-                pattern_type=pattern_spec.name,
-                is_bullish=is_bullish,
-                ab_xa_ratio=ab_xa,
-                bc_ab_ratio=bc_ab,
-                bc_projection=bc_projection,
-                cd_bc_ratio=cd_bc,
-                ad_xa_ratio=ad_xa,
-                entry_price=entry_price,
-                stop_loss=stop_loss,
-                ipo_target_1=ipo_target_1,
-                ipo_target_2=ipo_target_2,
-                target_point_a=target_point_a,
-                risk_reward=risk_reward,
-                prz_levels=prz_levels,
-                d_point_range_min=d_point_range_min,
-                d_point_range_max=d_point_range_max,
-                days_since_completion=0,
-                # pattern_quality=pattern_quality,  # REMOVED
-                tolerance_level=tolerance_level,
-                grade=grade,
-                trade_quality=trade_quality,
-                tp_strategy_used=tp_strategy_used,
-                # Multi-swing BC not detected from pyharmonics
-                is_multi_swing_bc=False,
-                bc_internal_swing_count=0,
-                bc_volatility=0.0,
-                bc_duration_bars=0
-            )
-
+        except (ValueError, KeyError, IndexError, AttributeError) as e:
+            raise PatternConversionError(
+                f"Failed to extract points from pyharmonics pattern: {e}",
+                source_format="pyharmonics",
+                target_format="Point"
+            ) from e
         except Exception as e:
-            # If conversion fails, skip this pattern
-            print(f"Warning: [{symbol}] Failed to convert pyharmonics pattern {py_pattern.name}: {e}")
-            return None
+            # Unexpected errors
+            raise PatternConversionError(
+                f"Unexpected error extracting points: {e}",
+                source_format="pyharmonics",
+                target_format="Point"
+            ) from e
 
-    def _validate_temporal_proportionality(self, x_ts, a_ts, b_ts, c_ts, d_ts) -> tuple:
+    def _calculate_fibonacci_ratios(self, py_pattern: Any) -> Dict[str, float]:
+        """
+        Calculate Fibonacci ratios from pyharmonics pattern.
+
+        Args:
+            py_pattern: pyharmonics XABCDPattern object
+
+        Returns:
+            Dictionary containing all Fibonacci ratios
+        """
+        from pyharmonics import constants
+
+        # Use Fibonacci ratios from pyharmonics (trust their calculations)
+        # py_pattern.retraces contains:
+        #   'XAB'   = AB/XA ratio (B-point)
+        #   'ABC'   = BC/AB ratio (C-point retracement)
+        #   'BCD'   = CD/BC ratio (BC projection)
+        #   'XABCD' = XD/XA ratio (D-point completion)
+        ab_xa = py_pattern.retraces.get(constants.XAB, 0)
+        bc_ab = py_pattern.retraces.get(constants.ABC, 0)
+        bc_projection = py_pattern.retraces.get(constants.BCD, 0)
+        cd_bc = bc_projection  # Same as BCD
+        ad_xa = py_pattern.retraces.get(constants.XABCD, 0)
+
+        return {
+            'ab_xa': ab_xa,
+            'bc_ab': bc_ab,
+            'bc_projection': bc_projection,
+            'cd_bc': cd_bc,
+            'ad_xa': ad_xa
+        }
+
+    def _get_pattern_specification(self, py_pattern: Any) -> Optional[PatternSpec]:
+        """
+        Get pattern specification from pyharmonics pattern name.
+
+        Args:
+            py_pattern: pyharmonics XABCDPattern object
+
+        Returns:
+            PatternSpec object, or None if pattern type is unknown
+        """
+        # Map pyharmonics pattern names to our format
+        pattern_name_map = {
+            'bat': 'bat',
+            'alt bat': 'alternate_bat',
+            'gartley': 'gartley',
+            'butterfly': 'butterfly',
+            'crab': 'crab',
+            'deep crab': 'deep_crab',
+            'cypher': 'cypher',
+            'shark': 'shark',
+            'deep shark': '5_0',  # Map deep shark to 5-0 pattern
+        }
+        pattern_type = pattern_name_map.get(py_pattern.name.lower(), py_pattern.name.lower())
+
+        # Get pattern spec for Carney trading rules
+        pattern_spec = get_pattern_spec(pattern_type)
+        return pattern_spec
+
+    def _calculate_trading_specifications(
+        self,
+        points: Dict[str, Any],
+        ratios: Dict[str, float],
+        pattern_spec: PatternSpec,
+        df: pd.DataFrame,
+        symbol: str
+    ) -> Dict[str, Any]:
+        """
+        Calculate trading specifications (entry, stop, targets).
+
+        Args:
+            points: Dictionary containing XABCD points and is_bullish flag
+            ratios: Dictionary containing Fibonacci ratios
+            pattern_spec: Pattern specification
+            df: Price dataframe
+            symbol: Stock ticker symbol
+
+        Returns:
+            Dictionary containing all trading specifications
+        """
+        # Extract prices and metadata
+        x_price = points['x'].price
+        a_price = points['a'].price
+        b_price = points['b'].price
+        c_price = points['c'].price
+        d_price = points['d'].price
+        is_bullish = points['is_bullish']
+
+        # Calculate basic trading parameters
+        entry_price = d_price
+        xa_range = abs(a_price - x_price)
+        prz_levels = calculate_prz_levels(x_price, a_price, b_price, c_price, pattern_spec)
+
+        # Calculate D-point range (PRZ boundaries)
+        prz_tolerance_pct = self.config_helper.get_float('PRZ_TOLERANCE_PCT', 0.02)
+        d_point_range_min = d_price * (1 - prz_tolerance_pct)
+        d_point_range_max = d_price * (1 + prz_tolerance_pct)
+
+        # Calculate stop loss
+        stop_loss = self._calculate_stop_loss(
+            pattern_spec, x_price, a_price, b_price, c_price, d_price,
+            xa_range, is_bullish, df, points['d'].date, symbol
+        )
+
+        # Calculate profit targets
+        tp_result = self._calculate_profit_targets(
+            x_price, a_price, b_price, c_price, d_price,
+            is_bullish, df, points['d'].date, symbol
+        )
+
+        # Calculate risk/reward ratio
+        risk_reward = self._calculate_risk_reward(
+            entry_price, stop_loss, tp_result['ipo_target_1'],
+            tp_result['ipo_target_2'], tp_result['target_point_a']
+        )
+
+        return {
+            'entry_price': entry_price,
+            'stop_loss': stop_loss,
+            'ipo_target_1': tp_result['ipo_target_1'],
+            'ipo_target_2': tp_result['ipo_target_2'],
+            'target_point_a': tp_result['target_point_a'],
+            'risk_reward': risk_reward,
+            'prz_levels': prz_levels,
+            'd_point_range_min': d_point_range_min,
+            'd_point_range_max': d_point_range_max,
+            'tp_strategy_used': tp_result['tp_strategy_used']
+        }
+
+    def _calculate_stop_loss(
+        self,
+        pattern_spec: PatternSpec,
+        x_price: float,
+        a_price: float,
+        b_price: float,
+        c_price: float,
+        d_price: float,
+        xa_range: float,
+        is_bullish: bool,
+        df: pd.DataFrame,
+        d_ts: pd.Timestamp,
+        symbol: str
+    ) -> float:
+        """Calculate stop loss with optional strategy override."""
+        # Base stop loss using Carney's pattern-specific ratio
+        stop_loss = calculate_stop_loss(pattern_spec, x_price, xa_range, is_bullish)
+
+        # Get TP strategy for potential stop loss override
+        tp_strategy = self._get_tp_strategy()
+
+        # Determine pattern high/low for strategy calculations
+        pattern_high = a_price if is_bullish else d_price
+        pattern_low = d_price if is_bullish else a_price
+
+        # Find d_index in dataframe
+        try:
+            d_index = df.index.get_loc(df.index[df.index >= d_ts][0])
+        except (IndexError, KeyError):
+            d_index = len(df) - 1
+
+        # Check if TP strategy has custom stop loss calculation
+        max_allowed_stop_loss_pct = self.config_helper.get_float('MAX_ALLOWED_STOP_LOSS_PCT', 10.0)
+        min_allowed_stop_loss_pct = self.config_helper.get_float('MIN_ALLOWED_STOP_LOSS_PCT', 3.0)
+
+        strategy_stop_loss = tp_strategy.calculate_stop_loss(
+            pattern_high=pattern_high,
+            pattern_low=pattern_low,
+            is_bullish=is_bullish,
+            price_data=df,
+            x_price=x_price,
+            a_price=a_price,
+            b_price=b_price,
+            c_price=c_price,
+            d_price=d_price,
+            d_index=d_index,
+            max_allowed_stop_loss_pct=max_allowed_stop_loss_pct,
+            min_allowed_stop_loss_pct=min_allowed_stop_loss_pct
+        )
+
+        # Use strategy's stop loss if provided
+        return strategy_stop_loss if strategy_stop_loss is not None else stop_loss
+
+    def _calculate_profit_targets(
+        self,
+        x_price: float,
+        a_price: float,
+        b_price: float,
+        c_price: float,
+        d_price: float,
+        is_bullish: bool,
+        df: pd.DataFrame,
+        d_ts: pd.Timestamp,
+        symbol: str
+    ) -> Dict[str, Any]:
+        """Calculate profit targets using TP strategy."""
+        # Determine pattern high/low
+        pattern_high = a_price if is_bullish else d_price
+        pattern_low = d_price if is_bullish else a_price
+
+        # Find d_index in dataframe
+        try:
+            d_index = df.index.get_loc(df.index[df.index >= d_ts][0])
+        except (IndexError, KeyError):
+            d_index = len(df) - 1
+
+        # Get TP strategy and calculate targets
+        tp_strategy = self._get_tp_strategy()
+        tp_targets = tp_strategy.calculate_targets(
+            pattern_high=pattern_high,
+            pattern_low=pattern_low,
+            is_bullish=is_bullish,
+            price_data=df,
+            x_price=x_price,
+            a_price=a_price,
+            b_price=b_price,
+            c_price=c_price,
+            d_price=d_price,
+            d_index=d_index,
+            ticker=symbol
+        )
+
+        return {
+            'ipo_target_1': tp_targets.primary,
+            'ipo_target_2': tp_targets.secondary,
+            'target_point_a': tp_targets.final if tp_targets.final else a_price,
+            'tp_strategy_used': tp_targets.tp_strategy_used if hasattr(tp_targets, 'tp_strategy_used') else ""
+        }
+
+    def _calculate_risk_reward(
+        self,
+        entry_price: float,
+        stop_loss: float,
+        target_1: float,
+        target_2: float,
+        target_3: float
+    ) -> float:
+        """Calculate weighted risk/reward ratio."""
+        risk = abs(entry_price - stop_loss)
+        reward_t1 = abs(target_1 - entry_price)
+        reward_t2 = abs(target_2 - entry_price)
+        reward_t3 = abs(target_3 - entry_price)
+
+        # Weighted average reward using config position sizing
+        weighted_reward = (reward_t1 * config.POSITION_SIZE_T1) + \
+                        (reward_t2 * config.POSITION_SIZE_T2) + \
+                        (reward_t3 * config.POSITION_SIZE_T3)
+
+        return weighted_reward / risk if risk > 0 else 0
+
+    def _validate_temporal_proportionality(self, x_ts: pd.Timestamp, a_ts: pd.Timestamp, b_ts: pd.Timestamp, c_ts: pd.Timestamp, d_ts: pd.Timestamp) -> Tuple[bool, str]:
         """
         Validate that pattern legs have proportional time relationships.
         Filters out patterns where CD leg is disproportionately extended compared to other legs.
@@ -508,6 +670,70 @@ class PatternDetector:
         # Pattern passes temporal validation
         return True, ""
 
+    def _create_harmonic_pattern(
+        self,
+        points: Dict[str, Any],
+        ratios: Dict[str, float],
+        pattern_spec: PatternSpec,
+        trading_specs: Dict[str, Any],
+        grade: str,
+        fib_tolerance: float
+    ) -> HarmonicPattern:
+        """
+        Create HarmonicPattern object from all components.
+
+        Args:
+            points: Dictionary containing XABCD points and is_bullish flag
+            ratios: Dictionary containing Fibonacci ratios
+            pattern_spec: Pattern specification
+            trading_specs: Dictionary containing trading specifications
+            grade: Pattern grade (A+ to C-)
+            fib_tolerance: Fibonacci tolerance used
+
+        Returns:
+            HarmonicPattern object
+        """
+        # For pyharmonics patterns, tolerance_level shows the fib_tolerance as percentage
+        tolerance_level = f"{fib_tolerance*100:.1f}%"
+
+        # Determine trade quality tier based on grade
+        trade_quality = self._get_trade_quality(grade)
+
+        # Create HarmonicPattern object
+        return HarmonicPattern(
+            x=points['x'],
+            a=points['a'],
+            b=points['b'],
+            c=points['c'],
+            d=points['d'],
+            pattern_type=pattern_spec.name,
+            is_bullish=points['is_bullish'],
+            ab_xa_ratio=ratios['ab_xa'],
+            bc_ab_ratio=ratios['bc_ab'],
+            bc_projection=ratios['bc_projection'],
+            cd_bc_ratio=ratios['cd_bc'],
+            ad_xa_ratio=ratios['ad_xa'],
+            entry_price=trading_specs['entry_price'],
+            stop_loss=trading_specs['stop_loss'],
+            ipo_target_1=trading_specs['ipo_target_1'],
+            ipo_target_2=trading_specs['ipo_target_2'],
+            target_point_a=trading_specs['target_point_a'],
+            risk_reward=trading_specs['risk_reward'],
+            prz_levels=trading_specs['prz_levels'],
+            d_point_range_min=trading_specs['d_point_range_min'],
+            d_point_range_max=trading_specs['d_point_range_max'],
+            days_since_completion=0,
+            tolerance_level=tolerance_level,
+            grade=grade,
+            trade_quality=trade_quality,
+            tp_strategy_used=trading_specs['tp_strategy_used'],
+            # Multi-swing BC not detected from pyharmonics
+            is_multi_swing_bc=False,
+            bc_internal_swing_count=0,
+            bc_volatility=0.0,
+            bc_duration_bars=0
+        )
+
     # REMOVED: _assess_pattern_quality() method - quality classification no longer used
     # def _assess_pattern_quality(self, ab_xa: float, b_min: float, b_max: float,
     #                             bc_proj: float, bc_min: float, bc_max: float) -> str:
@@ -533,10 +759,10 @@ class PatternDetector:
 
 
     def _calculate_pyharmonics_grade(self, ab_xa: float, ad_xa: float, bc_projection: float,
-                                     pattern_spec, fib_tolerance: float,
+                                     pattern_spec: PatternSpec, fib_tolerance: float,
                                      x_price: float, a_price: float, b_price: float,
                                      c_price: float, d_price: float,
-                                     x_ts, a_ts, b_ts, c_ts, d_ts) -> str:
+                                     x_ts: pd.Timestamp, a_ts: pd.Timestamp, b_ts: pd.Timestamp, c_ts: pd.Timestamp, d_ts: pd.Timestamp) -> str:
         """
         Calculate refined harmonic grade emphasizing D-point accuracy, PRZ convergence, and time symmetry.
 
@@ -666,7 +892,7 @@ class PatternDetector:
 
     def _calculate_prz_convergence(self, x_price: float, a_price: float, b_price: float,
                                    c_price: float, d_price: float, ad_xa: float,
-                                   bc_projection: float, pattern_spec) -> float:
+                                   bc_projection: float, pattern_spec: PatternSpec) -> float:
         """
         Calculate PRZ (Potential Reversal Zone) convergence bonus/penalty.
 
@@ -746,7 +972,7 @@ class PatternDetector:
         else:
             return -5.0  # Dispersed PRZ
 
-    def _calculate_time_symmetry(self, x_ts, a_ts, b_ts, c_ts, d_ts) -> float:
+    def _calculate_time_symmetry(self, x_ts: pd.Timestamp, a_ts: pd.Timestamp, b_ts: pd.Timestamp, c_ts: pd.Timestamp, d_ts: pd.Timestamp) -> float:
         """
         Calculate time symmetry adjustment based on XB vs BD leg duration.
 
@@ -840,7 +1066,7 @@ class PatternDetector:
 
     def generate_pattern_chart(self, pattern: HarmonicPattern, ticker: str,
                                df: pd.DataFrame, chart_dir: str, interval: str = '1d',
-                               reaction_data=None) -> str:
+                               reaction_data: Optional[Any] = None) -> str:
         """
         Generate a chart visualization of the harmonic pattern with Type 1/Type 2 reaction overlay.
 
@@ -855,387 +1081,18 @@ class PatternDetector:
         Returns:
             Path to the saved chart image
         """
-        # Create directory if it doesn't exist
-        os.makedirs(chart_dir, exist_ok=True)
-
-        # Create figure
-        fig, ax = plt.subplots(figsize=(16, 9))
-
-        # Calculate pattern timeframe (X to D) and show 2x that range
-        # Get the date range of the pattern (from X to D)
-        pattern_start = pattern.x.date
-        pattern_end = pattern.d.date
-        pattern_duration = pattern_end - pattern_start
-
-        # Calculate 2x the pattern duration
-        chart_start = pattern_end - (pattern_duration * 2)
-
-        # Filter dataframe to show 2x the pattern timeframe
-        # If chart_start is before the data, use all available data
-        df_window = df[df.index >= chart_start]
-
-        # Ensure we have the pattern completion point in the window
-        if pattern_end not in df_window.index:
-            df_window = df
-
-        # Plot candlesticks
-        dates = df_window.index
-        opens = df_window['open'].values
-        closes = df_window['close'].values
-        highs = df_window['high'].values
-        lows = df_window['low'].values
-
-        # Convert dates to numeric for candlestick plotting
-        from matplotlib.patches import Rectangle
-        import matplotlib.patches as mpatches
-
-        # Candlestick width (adjust based on interval)
-        candle_width = 0.6
-        if interval == '1wk':
-            candle_width = 5  # 5 days for weekly
-        elif interval == '1mo':
-            candle_width = 20  # 20 days for monthly
-
-        # Draw candlesticks
-        for i, date in enumerate(dates):
-            open_price = opens[i]
-            close_price = closes[i]
-            high_price = highs[i]
-            low_price = lows[i]
-
-            # Determine candle color
-            if close_price >= open_price:
-                # Bullish candle (green)
-                body_color = '#26a69a'  # Teal green
-                edge_color = '#1a7a6d'
-            else:
-                # Bearish candle (red)
-                body_color = '#ef5350'  # Red
-                edge_color = '#c62828'
-
-            # Draw high-low line (wick)
-            ax.plot([date, date], [low_price, high_price],
-                   color=edge_color, linewidth=1, zorder=1)
-
-            # Draw open-close rectangle (body)
-            height = abs(close_price - open_price)
-            bottom = min(open_price, close_price)
-
-            rect = Rectangle((mdates.date2num(date) - candle_width/2, bottom),
-                           candle_width, height,
-                           facecolor=body_color, edgecolor=edge_color,
-                           linewidth=1, zorder=2, alpha=0.8)
-            ax.add_patch(rect)
-
-        # Plot the harmonic pattern overlay
-        pattern_points = [pattern.x, pattern.a, pattern.b, pattern.c, pattern.d]
-        pattern_dates = [p.date for p in pattern_points]
-        pattern_prices = [p.price for p in pattern_points]
-        pattern_labels = ['X', 'A', 'B', 'C', 'D']
-
-        # Pattern line color based on direction
-        pattern_line_color = '#2962ff' if pattern.is_bullish else '#ff6d00'  # Blue for bullish, Orange for bearish
-
-        # Draw pattern lines with higher zorder to overlay on candlesticks
-        for i in range(len(pattern_points) - 1):
-            ax.plot([pattern_dates[i], pattern_dates[i+1]],
-                   [pattern_prices[i], pattern_prices[i+1]],
-                   color=pattern_line_color, linewidth=3, alpha=0.9, zorder=10,
-                   solid_capstyle='round')
-
-        # Fill pattern area with transparent color
-        pattern_x_coords = pattern_dates
-        pattern_y_coords = pattern_prices
-        ax.fill(pattern_x_coords, pattern_y_coords,
-               color=pattern_line_color, alpha=0.1, zorder=3)
-
-        # Plot pattern points with distinct colors
-        point_colors = ['#d32f2f', '#388e3c', '#d32f2f', '#388e3c', '#d32f2f'] if pattern.is_bullish else ['#388e3c', '#d32f2f', '#388e3c', '#d32f2f', '#388e3c']
-        for i, (date, price, label, color) in enumerate(zip(pattern_dates, pattern_prices, pattern_labels, point_colors)):
-            # Draw larger outer circle
-            ax.scatter(date, price, c='white', s=300, zorder=11, edgecolors='black', linewidth=3)
-            # Draw inner colored circle
-            ax.scatter(date, price, c=color, s=250, zorder=12, edgecolors='black', linewidth=2)
-
-            # Add label with offset to avoid overlap
-            y_offset = (max(pattern_prices) - min(pattern_prices)) * 0.03
-            ax.text(date, price + y_offset, label,
-                   fontsize=12, fontweight='bold', ha='center', va='bottom',
-                   color='white', zorder=13,
-                   bbox=dict(boxstyle='round,pad=0.4', facecolor='black', alpha=0.8, edgecolor=color, linewidth=2))
-
-            # Add price label below
-            ax.text(date, price - y_offset, f'${price:.2f}',
-                   fontsize=9, ha='center', va='top',
-                   color='black', zorder=13,
-                   bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.9, edgecolor='gray', linewidth=1))
-
-        # ========== ADD FIBONACCI RATIO VECTORS (LAYER II) ==========
-        # Draw four critical Fibonacci relationship vectors with dashed lines and ratio labels
-        # These help visualize the geometric relationships that define the harmonic pattern
-
-        ratio_vector_color = '#1e88e5'  # Blue color for ratio vectors
-        ratio_vector_style = '--'  # Dashed line style
-        ratio_vector_width = 2.5
-        ratio_vector_alpha = 0.6
-
-        # Vector 1: X → B (R_XAB - AB/XA ratio)
-        ax.plot([pattern.x.date, pattern.b.date],
-               [pattern.x.price, pattern.b.price],
-               color=ratio_vector_color, linewidth=ratio_vector_width,
-               linestyle=ratio_vector_style, alpha=ratio_vector_alpha, zorder=8)
-
-        # Midpoint for X→B label
-        xb_mid_date = pattern.x.date + (pattern.b.date - pattern.x.date) / 2
-        xb_mid_price = (pattern.x.price + pattern.b.price) / 2
-        ax.text(xb_mid_date, xb_mid_price, f'{pattern.ab_xa_ratio:.3f}',
-               fontsize=9, ha='center', va='center', fontweight='bold',
-               color='white', zorder=14,
-               bbox=dict(boxstyle='round,pad=0.4', facecolor=ratio_vector_color,
-                        alpha=0.85, edgecolor='white', linewidth=1.5))
-
-        # Vector 2: A → C (R_ABC - BC/AB ratio)
-        ax.plot([pattern.a.date, pattern.c.date],
-               [pattern.a.price, pattern.c.price],
-               color=ratio_vector_color, linewidth=ratio_vector_width,
-               linestyle=ratio_vector_style, alpha=ratio_vector_alpha, zorder=8)
-
-        # Midpoint for A→C label
-        ac_mid_date = pattern.a.date + (pattern.c.date - pattern.a.date) / 2
-        ac_mid_price = (pattern.a.price + pattern.c.price) / 2
-        ax.text(ac_mid_date, ac_mid_price, f'{pattern.bc_ab_ratio:.3f}',
-               fontsize=9, ha='center', va='center', fontweight='bold',
-               color='white', zorder=14,
-               bbox=dict(boxstyle='round,pad=0.4', facecolor=ratio_vector_color,
-                        alpha=0.85, edgecolor='white', linewidth=1.5))
-
-        # Vector 3: B → D (R_BCD - CD/BC ratio, also known as BC projection)
-        ax.plot([pattern.b.date, pattern.d.date],
-               [pattern.b.price, pattern.d.price],
-               color=ratio_vector_color, linewidth=ratio_vector_width,
-               linestyle=ratio_vector_style, alpha=ratio_vector_alpha, zorder=8)
-
-        # Midpoint for B→D label
-        bd_mid_date = pattern.b.date + (pattern.d.date - pattern.b.date) / 2
-        bd_mid_price = (pattern.b.price + pattern.d.price) / 2
-        ax.text(bd_mid_date, bd_mid_price, f'{pattern.bc_projection:.3f}',
-               fontsize=9, ha='center', va='center', fontweight='bold',
-               color='white', zorder=14,
-               bbox=dict(boxstyle='round,pad=0.4', facecolor=ratio_vector_color,
-                        alpha=0.85, edgecolor='white', linewidth=1.5))
-
-        # Vector 4: X → D (R_XABCD - AD/XA ratio, pattern completion ratio)
-        ax.plot([pattern.x.date, pattern.d.date],
-               [pattern.x.price, pattern.d.price],
-               color=ratio_vector_color, linewidth=ratio_vector_width,
-               linestyle=ratio_vector_style, alpha=ratio_vector_alpha, zorder=8)
-
-        # Midpoint for X→D label
-        xd_mid_date = pattern.x.date + (pattern.d.date - pattern.x.date) / 2
-        xd_mid_price = (pattern.x.price + pattern.d.price) / 2
-        ax.text(xd_mid_date, xd_mid_price, f'{pattern.ad_xa_ratio:.3f}',
-               fontsize=9, ha='center', va='center', fontweight='bold',
-               color='white', zorder=14,
-               bbox=dict(boxstyle='round,pad=0.4', facecolor=ratio_vector_color,
-                        alpha=0.85, edgecolor='white', linewidth=1.5))
-        # ============================================================
-
-        # Add Type 1 and Type 2 reaction visualization if available
-        if reaction_data:
-            # Mark Terminal Bar (T-Bar) at point D
-            ax.axvline(x=pattern.d.date, color='purple', linestyle=':', linewidth=3, alpha=0.8,
-                      zorder=15)
-
-            # Type 1 Reaction visualization
-            if reaction_data.type1_detected:
-                # Mark the Type 1 reversal bar
-                if reaction_data.type1_reversal_date:
-                    ax.axvline(x=reaction_data.type1_reversal_date, color='#ff9800',
-                              linestyle='-.', linewidth=2.5, alpha=0.8, zorder=15)
-
-                    # Draw arrow showing Type 1 move
-                    if pattern.is_bullish:
-                        # Bullish: arrow pointing up from D to Type 1 peak
-                        ax.annotate('', xy=(reaction_data.type1_reversal_date, reaction_data.type1_max_move),
-                                   xytext=(pattern.d.date, pattern.d.price),
-                                   arrowprops=dict(arrowstyle='->', color='#ff9800', lw=2.5, alpha=0.7),
-                                   zorder=14)
-
-                        # Mark if 38.2% target reached
-                        if reaction_data.type1_reached_382:
-                            ax.scatter(reaction_data.type1_reversal_date, reaction_data.target_382,
-                                     marker='*', s=400, c='gold', edgecolors='black', linewidth=2,
-                                     zorder=16)
-
-                        # Mark if 61.8% target reached
-                        if reaction_data.type1_reached_618:
-                            ax.scatter(reaction_data.type1_reversal_date, reaction_data.target_618,
-                                     marker='*', s=500, c='lime', edgecolors='black', linewidth=2,
-                                     zorder=16)
-                    else:
-                        # Bearish: arrow pointing down from D to Type 1 low
-                        ax.annotate('', xy=(reaction_data.type1_reversal_date, reaction_data.type1_max_move),
-                                   xytext=(pattern.d.date, pattern.d.price),
-                                   arrowprops=dict(arrowstyle='->', color='#ff9800', lw=2.5, alpha=0.7),
-                                   zorder=14)
-
-                        # Mark targets for bearish
-                        if reaction_data.type1_reached_382:
-                            ax.scatter(reaction_data.type1_reversal_date, reaction_data.target_382,
-                                     marker='*', s=400, c='gold', edgecolors='black', linewidth=2,
-                                     zorder=16)
-
-                        if reaction_data.type1_reached_618:
-                            ax.scatter(reaction_data.type1_reversal_date, reaction_data.target_618,
-                                     marker='*', s=500, c='lime', edgecolors='black', linewidth=2,
-                                     zorder=16)
-
-            # Type 2 Reaction visualization
-            if reaction_data.type2_detected:
-                # Mark Type 2 retest area
-                if reaction_data.type2_retest_date:
-                    ax.axvline(x=reaction_data.type2_retest_date, color='magenta',
-                              linestyle='--', linewidth=2.5, alpha=0.8, zorder=15)
-
-                    # Mark Type 2 Terminal Bar
-                    if reaction_data.type2_terminal_bar_date:
-                        ax.axvline(x=reaction_data.type2_terminal_bar_date, color='cyan',
-                                  linestyle=':', linewidth=2.5, alpha=0.8, zorder=15)
-
-                        # Highlight the Type 2 retest zone
-                        ax.axvspan(reaction_data.type2_retest_date, reaction_data.type2_terminal_bar_date,
-                                  alpha=0.15, color='magenta', zorder=5)
-
-        # Add title and labels
-        direction = "BULLISH" if pattern.is_bullish else "BEARISH"
-        interval_name = {'1d': 'Daily', '1wk': 'Weekly', '1mo': 'Monthly'}.get(interval, interval.upper())
-        title = f"{ticker} - {direction} {pattern.pattern_type.upper()}"
-        subtitle = f"{interval_name} Chart | Grade: {pattern.grade} | Detected: {pattern.d.date.date()} | R/R: {pattern.risk_reward:.2f}:1"
-        ax.set_title(f"{title}\n{subtitle}", fontsize=14, fontweight='bold')
-        ax.set_xlabel('Date', fontsize=12)
-        ax.set_ylabel('Price ($)', fontsize=12)
-
-        # Mark important dates on x-axis (pattern points and reactions)
-        important_dates = [pattern.x.date, pattern.a.date, pattern.b.date,
-                          pattern.c.date, pattern.d.date]
-        important_labels = ['X', 'A', 'B', 'C', 'D']
-
-        # Add reaction dates if available
-        if reaction_data:
-            if reaction_data.type1_detected and reaction_data.type1_reversal_date:
-                important_dates.append(reaction_data.type1_reversal_date)
-                important_labels.append('T1')
-            if reaction_data.type2_detected and reaction_data.type2_terminal_bar_date:
-                important_dates.append(reaction_data.type2_terminal_bar_date)
-                important_labels.append('T2')
-
-        # Set x-axis to show these important dates
-        ax.set_xticks(important_dates)
-        ax.set_xticklabels([f"{label}\n{date.strftime('%Y-%m-%d')}"
-                           for label, date in zip(important_labels, important_dates)],
-                          rotation=45, ha='right', fontsize=9, fontweight='bold')
-
-        # Add minor ticks for other dates (less prominent)
-        ax.xaxis.set_minor_locator(mdates.AutoDateLocator())
-        ax.xaxis.set_minor_formatter(mdates.DateFormatter('%m/%d'))
-
-        # Add grid with subtle styling
-        ax.grid(True, alpha=0.2, linestyle='--', linewidth=0.5, zorder=0)
-        ax.set_facecolor('#f8f9fa')
-
-        # Calculate risk percentage
-        risk_pct = abs((pattern.entry_price - pattern.stop_loss) / pattern.entry_price * 100)
-
-        # Determine TP strategy display text
-        tp_strategy_display = ""
-        if hasattr(pattern, 'tp_strategy_used') and pattern.tp_strategy_used:
-            tp_strategy_display = f"\nStrategy: {pattern.tp_strategy_used}"
-
-        # Calculate PRZ range display
-        prz_range_text = ""
-        if pattern.d_point_range_min > 0 and pattern.d_point_range_max > 0:
-            # Calculate the tolerance percentage from entry price
-            range_from_entry = ((pattern.d_point_range_max - pattern.entry_price) / pattern.entry_price) * 100
-            prz_range_text = f"Entry Zone: ${pattern.d_point_range_min:.2f} - ${pattern.d_point_range_max:.2f} (±{range_from_entry:.1f}%)\n"
-
-        # Enhanced pattern info box (TOP LEFT)
-        info_text = (
-            f"TRADING LEVELS\n"
-            f"{'─'*20}\n"
-            f"Entry: ${pattern.entry_price:.2f}\n"
-            f"{prz_range_text}"
-            f"Stop:  ${pattern.stop_loss:.2f}\n"
-            f"Risk:  {risk_pct:.1f}%\n"
-            f"\n"
-            f"PROFIT TARGETS\n"
-            f"{'─'*20}\n"
-            f"T1: ${pattern.ipo_target_1:.2f}\n"
-            f"T2: ${pattern.ipo_target_2:.2f}\n"
-            f"T3: ${pattern.target_point_a:.2f}{tp_strategy_display}\n"
-            f"\n"
-            f"PATTERN METRICS\n"
-            f"{'─'*20}\n"
-            f"Tolerance: {pattern.tolerance_level}\n"
-            f"Grade:     {pattern.grade}\n"
+        # Delegate to ChartGenerator
+        return self.chart_generator.generate_pattern_chart(
+            pattern=pattern,
+            ticker=ticker,
+            df=df,
+            chart_dir=chart_dir,
+            interval=interval,
+            reaction_data=reaction_data
         )
 
-        # Add reaction information if available
-        if reaction_data:
-            info_text += (
-                f"\n"
-                f"REACTION ANALYSIS\n"
-                f"{'─'*20}\n"
-            )
-
-            if reaction_data.type1_detected:
-                info_text += f"Type 1: YES\n"
-                # Show Type 1 reversal price
-                if reaction_data.type1_max_move:
-                    info_text += f"  Price: ${reaction_data.type1_max_move:.2f}\n"
-                # Show 38.2% target
-                if reaction_data.target_382:
-                    status_382 = "✓" if reaction_data.type1_reached_382 else "○"
-                    info_text += f"  38.2% ({status_382}): ${reaction_data.target_382:.2f}\n"
-                # Show 61.8% target
-                if reaction_data.target_618:
-                    status_618 = "✓" if reaction_data.type1_reached_618 else "○"
-                    info_text += f"  61.8% ({status_618}): ${reaction_data.target_618:.2f}\n"
-                if reaction_data.type1_trendline_broken:
-                    info_text += f"  Trendline: BROKEN\n"
-            else:
-                info_text += f"Type 1: PENDING\n"
-
-            if reaction_data.type2_detected:
-                info_text += f"Type 2: YES\n"
-                info_text += f"  PRZ Retested\n"
-                # Show Type 2 retest price if available
-                if hasattr(reaction_data, 'type2_retest_price') and reaction_data.type2_retest_price:
-                    info_text += f"  Price: ${reaction_data.type2_retest_price:.2f}\n"
-            elif reaction_data.type1_trendline_broken:
-                info_text += f"Type 2: WATCHING\n"
-        ax.text(0.02, 0.98, info_text, transform=ax.transAxes,
-               fontsize=9, verticalalignment='top', horizontalalignment='left',
-               family='monospace', zorder=20,
-               bbox=dict(boxstyle='round,pad=0.8', facecolor='white',
-                        edgecolor='gray', alpha=0.95, linewidth=2))
-
-        # Add watermark/timestamp
-        fig.text(0.99, 0.01, f'Generated: {datetime.now().strftime("%Y-%m-%d %H:%M")}',
-                ha='right', va='bottom', fontsize=8, color='gray', alpha=0.5)
-
-        # Tight layout
-        plt.tight_layout()
-
-        # Save chart with higher DPI for better quality
-        chart_filename = f"{ticker}_{pattern.pattern_type.replace(' ', '_')}_{pattern.d.date.date()}.png"
-        chart_path = os.path.join(chart_dir, chart_filename)
-        plt.savefig(chart_path, dpi=150, bbox_inches='tight', facecolor='white', edgecolor='none')
-        plt.close()
-
-        return chart_path
-
     def generate_signal(self, pattern: HarmonicPattern, current_price: float,
-                       max_days_old: int = None, verbose: bool = False) -> Tuple[str, str]:
+                       max_days_old: Optional[int] = None, verbose: bool = False) -> Tuple[str, str]:
         """
         Generate trading signal based on Carney's exact framework from Volumes 1-3.
 
@@ -1572,19 +1429,19 @@ if __name__ == "__main__":
     # Test improved Carney-based detector
     import yfinance as yf
 
-    print("="*80)
-    print("IMPROVED HARMONIC PATTERN DETECTOR TEST")
-    print("Pyharmonics Peak Detection + Carney's Exact Rules (Volumes 1-3)")
-    print("="*80)
-    print()
+    logger.info("="*80)
+    logger.info("IMPROVED HARMONIC PATTERN DETECTOR TEST")
+    logger.info("Pyharmonics Peak Detection + Carney's Exact Rules (Volumes 1-3)")
+    logger.info("="*80)
+    logger.info("")
 
     # Download test data
     ticker = yf.Ticker("AAPL")
     df = ticker.history(period="6mo")
     df.columns = [c.lower() for c in df.columns]
 
-    print(f"Testing on AAPL - {len(df)} days of data")
-    print()
+    logger.info("Testing on AAPL - %d days of data", len(df))
+    logger.info("")
 
     # Create detector with Carney's specifications
     detector = PatternDetector()
@@ -1592,8 +1449,8 @@ if __name__ == "__main__":
     # Detect patterns
     patterns = detector.detect_patterns(df, "AAPL")
 
-    print(f"Found {len(patterns)} harmonic patterns using Carney's exact specifications")
-    print()
+    logger.info("Found %d harmonic patterns using Carney's exact specifications", len(patterns))
+    logger.info("")
 
     # Display patterns
     for i, pattern in enumerate(patterns[:5], 1):  # Show first 5
@@ -1602,10 +1459,12 @@ if __name__ == "__main__":
 
         from utils import FormattingUtils
 
-        print(f"Pattern {i}: {pattern.pattern_type.upper()} ({'BULLISH' if pattern.is_bullish else 'BEARISH'}) [Grade {pattern.grade}]")
-        print(f"  Points: X=${pattern.x.price:.2f} -> A=${pattern.a.price:.2f} -> B=${pattern.b.price:.2f} -> C=${pattern.c.price:.2f} -> D=${pattern.d.price:.2f}")
-        print(f"  Date Range: {pattern.x.date.date()} to {pattern.d.date.date()}")
-        print(f"  Ratios: {FormattingUtils.format_pattern_ratios(pattern)}")
-        print(f"  Signal: {signal}")
-        print(f"  {explanation}")
-        print()
+        logger.info("Pattern %d: %s (%s) [Grade %s]", i, pattern.pattern_type.upper(),
+                   'BULLISH' if pattern.is_bullish else 'BEARISH', pattern.grade)
+        logger.info("  Points: X=$%.2f -> A=$%.2f -> B=$%.2f -> C=$%.2f -> D=$%.2f",
+                   pattern.x.price, pattern.a.price, pattern.b.price, pattern.c.price, pattern.d.price)
+        logger.info("  Date Range: %s to %s", pattern.x.date.date(), pattern.d.date.date())
+        logger.info("  Ratios: %s", FormattingUtils.format_pattern_ratios(pattern))
+        logger.info("  Signal: %s", signal)
+        logger.info("  %s", explanation)
+        logger.info("")

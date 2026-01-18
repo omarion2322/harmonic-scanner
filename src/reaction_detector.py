@@ -8,45 +8,62 @@ Type 2: Secondary retest of PRZ after Type 1 reaction fails
 
 import pandas as pd
 import numpy as np
-from typing import Optional, Tuple, Dict
-from dataclasses import dataclass
+from typing import Optional, Tuple, Dict, Any
 from datetime import datetime
+from pydantic import BaseModel, Field, field_validator
 
 
-@dataclass
-class ReactionData:
+class ReactionData(BaseModel):
     """
-    Stores data about Type 1 or Type 2 reactions after pattern completion
+    Stores data about Type 1 or Type 2 reactions after pattern completion with validation.
     """
-    reaction_type: str  # 'TYPE_1', 'TYPE_2', 'NONE', 'PENDING'
-    terminal_bar_idx: int  # Index of Terminal Price Bar (completes PRZ)
-    terminal_bar_date: pd.Timestamp
-    terminal_bar_price: float
+    reaction_type: str = Field(..., pattern='^(TYPE_1|TYPE_2|TYPE_1_FAILED|NONE|PENDING)$',
+                                description="Reaction type classification")
+    terminal_bar_idx: int = Field(..., ge=0, description="Index of Terminal Price Bar")
+    terminal_bar_date: datetime = Field(..., description="Date of terminal bar")
+    terminal_bar_price: float = Field(..., gt=0, description="Price at terminal bar")
 
     # Type 1 specific
-    type1_detected: bool
-    type1_reversal_bar_idx: Optional[int] = None
-    type1_reversal_date: Optional[pd.Timestamp] = None
-    type1_max_move: Optional[float] = None  # Max price reached during Type 1
-    type1_reached_382: bool = False
-    type1_reached_618: bool = False
-    type1_trendline_broken: bool = False
+    type1_detected: bool = Field(False, description="Whether Type 1 reaction detected")
+    type1_reversal_bar_idx: Optional[int] = Field(None, ge=0, description="Type 1 reversal bar index")
+    type1_reversal_date: Optional[datetime] = Field(None, description="Type 1 reversal date")
+    type1_max_move: Optional[float] = Field(None, gt=0, description="Max price during Type 1")
+    type1_reached_382: bool = Field(False, description="Reached 38.2% target")
+    type1_reached_618: bool = Field(False, description="Reached 61.8% target")
+    type1_trendline_broken: bool = Field(False, description="Trendline broken after reaction")
 
     # Type 2 specific
-    type2_detected: bool = False
-    type2_retest_bar_idx: Optional[int] = None
-    type2_retest_date: Optional[pd.Timestamp] = None
-    type2_terminal_bar_idx: Optional[int] = None
-    type2_terminal_bar_date: Optional[pd.Timestamp] = None
-    type2_terminal_bar_price: Optional[float] = None
+    type2_detected: bool = Field(False, description="Whether Type 2 reaction detected")
+    type2_retest_bar_idx: Optional[int] = Field(None, ge=0, description="Type 2 retest bar index")
+    type2_retest_date: Optional[datetime] = Field(None, description="Type 2 retest date")
+    type2_terminal_bar_idx: Optional[int] = Field(None, ge=0, description="Type 2 terminal bar index")
+    type2_terminal_bar_date: Optional[datetime] = Field(None, description="Type 2 terminal bar date")
+    type2_terminal_bar_price: Optional[float] = Field(None, gt=0, description="Type 2 terminal bar price")
 
     # Profit target levels
-    target_382: Optional[float] = None
-    target_618: Optional[float] = None
+    target_382: Optional[float] = Field(None, gt=0, description="38.2% profit target")
+    target_618: Optional[float] = Field(None, gt=0, description="61.8% profit target")
 
     # Status
-    bars_since_completion: int = 0
-    reaction_summary: str = ""
+    bars_since_completion: int = Field(0, ge=0, description="Bars since pattern completion")
+    reaction_summary: str = Field("", description="Human-readable reaction summary")
+
+    @field_validator('terminal_bar_date', 'type1_reversal_date', 'type2_retest_date', 'type2_terminal_bar_date', mode='before')
+    @classmethod
+    def convert_timestamp_to_datetime(cls, v):
+        """Convert pandas Timestamp to datetime."""
+        if v is None:
+            return v
+        if isinstance(v, pd.Timestamp):
+            return v.to_pydatetime()
+        return v
+
+    class Config:
+        arbitrary_types_allowed = True  # Allow pandas Timestamp
+        json_encoders = {
+            datetime: lambda v: v.isoformat(),
+            pd.Timestamp: lambda v: v.isoformat()
+        }
 
 
 class ReactionDetector:
@@ -55,11 +72,11 @@ class ReactionDetector:
     after harmonic pattern completion at point D
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.max_type1_bars = 10  # Monitor up to 10 bars for Type 1
         self.max_type2_bars = 30  # Monitor up to 30 bars total for Type 2
 
-    def detect_reaction(self, df: pd.DataFrame, pattern, current_idx: int) -> ReactionData:
+    def detect_reaction(self, df: pd.DataFrame, pattern: Any, current_idx: int) -> ReactionData:
         """
         Detect if Type 1 or Type 2 reaction occurred after pattern completion.
 
@@ -156,8 +173,8 @@ class ReactionDetector:
 
         return reaction
 
-    def _detect_type1(self, df: pd.DataFrame, pattern, terminal_bar_idx: int,
-                     current_idx: int, target_382: float, target_618: float) -> Dict:
+    def _detect_type1(self, df: pd.DataFrame, pattern: Any, terminal_bar_idx: int,
+                     current_idx: int, target_382: float, target_618: float) -> Dict[str, Any]:
         """
         Detect Type 1 reaction (immediate counter-trend move within 1-3 bars).
         """
@@ -234,8 +251,8 @@ class ReactionDetector:
 
         return result
 
-    def _detect_type2(self, df: pd.DataFrame, pattern, terminal_bar_idx: int,
-                     current_idx: int, type1_data: Dict) -> Dict:
+    def _detect_type2(self, df: pd.DataFrame, pattern: Any, terminal_bar_idx: int,
+                     current_idx: int, type1_data: Dict[str, Any]) -> Dict[str, Any]:
         """
         Detect Type 2 reversal based on:
         1. Breaking key structural level (B)
@@ -313,7 +330,7 @@ class ReactionDetector:
 
         return result
 
-    def _determine_reaction_type(self, type1_data: Dict, type2_data: Optional[Dict]) -> str:
+    def _determine_reaction_type(self, type1_data: Dict[str, Any], type2_data: Optional[Dict[str, Any]]) -> str:
         """Determine overall reaction type."""
         if type2_data and type2_data.get('detected'):
             return 'TYPE_2'
@@ -325,7 +342,7 @@ class ReactionDetector:
         else:
             return 'NONE'
 
-    def _generate_summary(self, reaction: ReactionData, pattern) -> str:
+    def _generate_summary(self, reaction: ReactionData, pattern: Any) -> str:
         """Generate human-readable summary of reaction."""
         if reaction.reaction_type == 'PENDING':
             return "Pattern just completed - monitoring for reaction"

@@ -27,7 +27,10 @@ Targets are adaptive, strength-weighted, and based on comprehensive market struc
 from tp_strategies.base import TPStrategy, TPTargets
 import pandas as pd
 import numpy as np
-from typing import List, Tuple
+from typing import List, Tuple, Optional
+from logging_config import get_logger
+
+logger = get_logger(__name__)
 
 try:
     import config
@@ -47,7 +50,7 @@ class MitchStrategy(TPStrategy):
     measured moves, and moving averages.
     """
 
-    def __init__(self, swing_window: int = 5, use_tp_scoring_engine: bool = True, tp_min_spacing_pct: float = 20.0):
+    def __init__(self, swing_window: int = 5, use_tp_scoring_engine: bool = True, tp_min_spacing_pct: float = 20.0) -> None:
         """
         Initialize Mitch strategy.
 
@@ -73,8 +76,8 @@ class MitchStrategy(TPStrategy):
                 from tp_scoring_engine import TPScoringEngine
                 self.TPScoringEngine = TPScoringEngine
             except ImportError as e:
-                print(f"Warning: TP Scoring Engine not available: {e}")
-                print("Falling back to standard Mitch strategy")
+                logger.warning("TP Scoring Engine not available: %s", e)
+                logger.info("Falling back to standard Mitch strategy")
                 self.use_tp_scoring_engine = False
 
     def calculate_targets(self,
@@ -88,7 +91,7 @@ class MitchStrategy(TPStrategy):
                          c_price: float,
                          d_price: float,
                          d_index: int,
-                         ticker: str = None) -> TPTargets:
+                         ticker: Optional[str] = None) -> TPTargets:
         """
         Calculate targets based on external market structure.
 
@@ -126,9 +129,13 @@ class MitchStrategy(TPStrategy):
                 else:
                     # If download failed or got less data, use provided price_data
                     historical_data = price_data.iloc[:d_index + 1].copy()
+            except (ValueError, KeyError, OSError) as e:
+                # Expected errors during download/processing
+                logger.debug("[%s] Could not download full history for S/R: %s", ticker, e)
+                historical_data = price_data.iloc[:d_index + 1].copy()
             except Exception as e:
-                # If any error, fallback to provided price_data
-                print(f"Warning: [{ticker}] Could not download full history for S/R: {e}")
+                # Unexpected errors
+                logger.warning("[%s] Unexpected error downloading full history for S/R: %s", ticker, e)
                 historical_data = price_data.iloc[:d_index + 1].copy()
         else:
             # Use provided price_data for pattern detection
@@ -194,10 +201,10 @@ class MitchStrategy(TPStrategy):
                                    pattern_low: float,
                                    swing_highs: List[float],
                                    swing_lows: List[float],
-                                   ma_20: float,
-                                   ma_50: float,
+                                   ma_20: Optional[float],
+                                   ma_50: Optional[float],
                                    historical_data: pd.DataFrame,
-                                   ticker: str = None) -> TPTargets:
+                                   ticker: Optional[str] = None) -> TPTargets:
         """Calculate targets for bullish patterns using external structure."""
 
         # CHECK IF TP SCORING ENGINE IS ENABLED
@@ -230,12 +237,15 @@ class MitchStrategy(TPStrategy):
                         tp_strategy_used="Scoring Engine"
                     )
                 else:
-                    ticker_info = f"[{ticker}] " if ticker else ""
-                    print(f"Warning: {ticker_info}TP Scoring Engine found no valid zones, falling back to standard method")
+                    logger.debug("[%s] TP Scoring Engine found no valid zones, falling back to standard method", ticker or "N/A")
+            except (ValueError, KeyError, IndexError) as e:
+                # Expected errors from scoring engine data processing
+                logger.debug("[%s] TP Scoring Engine failed (data error): %s", ticker or "N/A", e)
+                logger.debug("[%s] Falling back to standard Mitch strategy", ticker or "N/A")
             except Exception as e:
-                ticker_info = f"[{ticker}] " if ticker else ""
-                print(f"Warning: {ticker_info}TP Scoring Engine failed: {e}")
-                print(f"{ticker_info}Falling back to standard Mitch strategy")
+                # Unexpected errors
+                logger.warning("[%s] TP Scoring Engine failed unexpectedly: %s", ticker or "N/A", e)
+                logger.debug("[%s] Falling back to standard Mitch strategy", ticker or "N/A")
 
         # STANDARD METHOD: Fixed percentages from analysis
         # FINAL OPTIMIZATION from deep dive analysis (54 LONG trades, Grade B-+)
@@ -279,10 +289,10 @@ class MitchStrategy(TPStrategy):
                                    pattern_low: float,
                                    swing_highs: List[float],
                                    swing_lows: List[float],
-                                   ma_20: float,
-                                   ma_50: float,
+                                   ma_20: Optional[float],
+                                   ma_50: Optional[float],
                                    historical_data: pd.DataFrame,
-                                   ticker: str = None) -> TPTargets:
+                                   ticker: Optional[str] = None) -> TPTargets:
         """Calculate targets for bearish patterns using external structure."""
 
         # CHECK IF TP SCORING ENGINE IS ENABLED
@@ -315,12 +325,15 @@ class MitchStrategy(TPStrategy):
                         tp_strategy_used="Scoring Engine"
                     )
                 else:
-                    ticker_info = f"[{ticker}] " if ticker else ""
-                    print(f"Warning: {ticker_info}TP Scoring Engine found no valid zones for SHORT, falling back to standard method")
+                    logger.debug("[%s] TP Scoring Engine found no valid zones for SHORT, falling back to standard method", ticker or "N/A")
+            except (ValueError, KeyError, IndexError) as e:
+                # Expected errors from scoring engine data processing
+                logger.debug("[%s] TP Scoring Engine failed for SHORT (data error): %s", ticker or "N/A", e)
+                logger.debug("[%s] Falling back to standard Mitch strategy", ticker or "N/A")
             except Exception as e:
-                ticker_info = f"[{ticker}] " if ticker else ""
-                print(f"Warning: {ticker_info}TP Scoring Engine failed for SHORT: {e}")
-                print(f"{ticker_info}Falling back to standard Mitch strategy")
+                # Unexpected errors
+                logger.warning("[%s] TP Scoring Engine failed for SHORT unexpectedly: %s", ticker or "N/A", e)
+                logger.debug("[%s] Falling back to standard Mitch strategy", ticker or "N/A")
 
         # STANDARD METHOD: Fixed percentages from analysis
         # DATA-DRIVEN OPTIMIZATION from actual trade analysis (29 SHORT trades, Grade B-+, R/R 3+)
@@ -387,7 +400,7 @@ class MitchStrategy(TPStrategy):
                                            swing_highs: List[float],
                                            swing_lows: List[float],
                                            d_price: float,
-                                           is_bullish: bool) -> float:
+                                           is_bullish: bool) -> Optional[float]:
         """
         Find the strongest support/resistance level based on clustering.
 
@@ -447,7 +460,7 @@ class MitchStrategy(TPStrategy):
                            d_price: float,
                            d_index: int,
                            max_allowed_stop_loss_pct: float,
-                           min_allowed_stop_loss_pct: float = None) -> float:
+                           min_allowed_stop_loss_pct: Optional[float] = None) -> float:
         """
         Calculate stop loss using Mitch Ray's external market structure approach.
 

@@ -11,6 +11,9 @@ import yfinance as yf
 import pandas as pd
 import time
 from typing import Optional
+from logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 def download_stock_data(
@@ -74,16 +77,20 @@ def download_stock_data(
                 # SUCCESS
                 if attempt > 0:
                     # Retry succeeded - log it
-                    print(f"${ticker}: ✓ Retry succeeded (attempt {attempt + 1})")
+                    logger.info("%s: Retry succeeded (attempt %d)", ticker, attempt + 1)
                 return df
             else:
                 # Empty DataFrame - stock might not exist or have no data
                 last_error = f"No data returned (DataFrame is empty but no exception raised)"
 
-        except Exception as e:
+        except (ValueError, KeyError, OSError) as e:
+            # Common yfinance errors: ValueError (invalid params), KeyError (missing data), OSError (network)
             error_str = str(e)
 
             # Handle yfinance dividend metadata errors gracefully
+        except Exception as e:
+            # Catch-all for unexpected errors
+            error_str = str(e)
             # These errors occur when dividend dates don't align with the requested interval
             # but don't actually prevent price data from being downloaded
             # Example: "The following 'Dividends' events are out-of-range..."
@@ -112,9 +119,9 @@ def download_stock_data(
                         )
                         if not df.empty:
                             if first_failure_logged:
-                                print(f"${ticker}: ✓ Dividend error bypassed using period={fallback_period}")
+                                logger.info("%s: Dividend error bypassed using period=%s", ticker, fallback_period)
                             return df
-                    except:
+                    except Exception:
                         continue  # Try next fallback period
 
                 # If all fallbacks failed, continue to retry logic
@@ -137,17 +144,17 @@ def download_stock_data(
         # Log first failure
         if not first_failure_logged:
             error_msg = str(last_error)[:50] + "..." if len(str(last_error)) > 50 else str(last_error)
-            print(f"${ticker}: ⚠ Download failed - {error_msg}")
+            logger.warning("%s: Download failed - %s", ticker, error_msg)
             first_failure_logged = True
 
         # Retry if attempts remain
         if attempt < max_retries - 1:  # Don't sleep on last attempt
-            print(f"${ticker}: ⟳ Retrying in {delay:.1f}s... (attempt {attempt + 2}/{max_retries})")
+            logger.info("%s: Retrying in %.1fs... (attempt %d/%d)", ticker, delay, attempt + 2, max_retries)
             time.sleep(delay)
             delay *= backoff_factor  # Exponential backoff
 
     # All retries exhausted
-    print(f"${ticker}: ✗ All {max_retries} attempts failed")
+    logger.error("%s: All %d attempts failed", ticker, max_retries)
     return pd.DataFrame()
 
 
@@ -216,25 +223,25 @@ def download_monthly_data(ticker: str, period: str = '5y') -> pd.DataFrame:
 
 if __name__ == "__main__":
     # Test the retry mechanism
-    print("Testing Data Downloader with Retry Logic")
-    print("="*60)
+    logger.info("Testing Data Downloader with Retry Logic")
+    logger.info("="*60)
 
     # Test 1: Valid ticker
-    print("\nTest 1: Valid ticker (AAPL)")
+    logger.info("\nTest 1: Valid ticker (AAPL)")
     df = download_stock_data('AAPL', period='1mo', interval='1d')
-    print(f"  Result: {'Success' if not df.empty else 'Failed'} - {len(df)} bars")
+    logger.info("  Result: %s - %d bars", 'Success' if not df.empty else 'Failed', len(df))
 
     # Test 2: Invalid ticker (should fail gracefully)
-    print("\nTest 2: Invalid ticker (INVALID123)")
+    logger.info("\nTest 2: Invalid ticker (INVALID123)")
     df = download_stock_data('INVALID123', period='1mo', interval='1d')
-    print(f"  Result: {'Success' if not df.empty else 'Failed'} - {len(df)} bars")
+    logger.info("  Result: %s - %d bars", 'Success' if not df.empty else 'Failed', len(df))
 
     # Test 3: With rate limiting
-    print("\nTest 3: Multiple downloads with rate limiting")
+    logger.info("\nTest 3: Multiple downloads with rate limiting")
     tickers = ['MSFT', 'GOOGL', 'TSLA']
     for ticker in tickers:
         df = download_with_rate_limit(ticker, period='1mo', rate_limit_delay=0.2)
-        print(f"  {ticker}: {len(df)} bars")
+        logger.info("  %s: %d bars", ticker, len(df))
 
-    print("\n" + "="*60)
-    print("Testing complete!")
+    logger.info("\n" + "="*60)
+    logger.info("Testing complete!")

@@ -96,28 +96,35 @@ class TPScoringEngine:
 
     def _detect_swings(self) -> Tuple[pd.Series, pd.Series]:
         """
-        Detect swing highs and swing lows using trendln.
+        Detect swing highs and swing lows using scipy.
+
+        IMPROVED: Uses order=2 instead of order=5 to catch more swing points,
+        especially in consolidation zones. This helps identify support/resistance
+        areas where price oscillates rather than forming sharp V-shaped pivots.
 
         Returns:
             Tuple of (swing_highs, swing_lows) as boolean Series
         """
         try:
-            # Use trendln to find swing points
-            # minimaIdxs and maximaIdxs return indices of swing points
             from scipy.signal import argrelextrema
+
+            # FIXED: Reduced from order=5 to order=2
+            # order=5 was too strict and missed consolidation zones
+            # order=2 catches more swing points while still filtering noise
+            swing_order = 2
 
             # Find local maxima (swing highs)
             high_indices = argrelextrema(
                 self.df['high'].values,
                 np.greater,
-                order=5  # Look 5 bars on each side
+                order=swing_order
             )[0]
 
             # Find local minima (swing lows)
             low_indices = argrelextrema(
                 self.df['low'].values,
                 np.less,
-                order=5
+                order=swing_order
             )[0]
 
             # Convert to boolean Series
@@ -159,15 +166,18 @@ class TPScoringEngine:
         )
 
     def _cluster_levels(self, prices: np.ndarray, indices, zone_type: str,
-                       cluster_tolerance: float = 0.02) -> List[Dict]:
+                       cluster_tolerance: float = 0.05) -> List[Dict]:
         """
         Cluster nearby price levels into zones.
+
+        IMPROVED: Increased tolerance from 2% to 5% to better capture
+        consolidation zones and support/resistance areas.
 
         Args:
             prices: Array of price levels
             indices: Corresponding dataframe indices
             zone_type: 'Support' or 'Resistance'
-            cluster_tolerance: Percentage tolerance for clustering (default 2%)
+            cluster_tolerance: Percentage tolerance for clustering (default 5%)
 
         Returns:
             List of zone dictionaries
@@ -191,7 +201,9 @@ class TPScoringEngine:
                 current_indices.append(sorted_df_indices[i])
             else:
                 # Save current cluster and start new one
-                if len(current_cluster) >= 2:  # Require at least 2 touches
+                # IMPROVED: Allow single swing points (was >= 2)
+                # With stricter swing detection (order=2), individual pivots are significant
+                if len(current_cluster) >= 1:
                     zones.append({
                         'prices': current_cluster,
                         'indices': current_indices,
@@ -201,7 +213,8 @@ class TPScoringEngine:
                 current_indices = [sorted_df_indices[i]]
 
         # Add last cluster
-        if len(current_cluster) >= 2:
+        # IMPROVED: Allow single swing points (was >= 2)
+        if len(current_cluster) >= 1:
             zones.append({
                 'prices': current_cluster,
                 'indices': current_indices,
@@ -473,10 +486,14 @@ class TPScoringEngine:
         """
         Calculate comprehensive score for a TP zone.
 
-        TP_SCORE = 0.30 × TouchScore
-                 + 0.25 × VolumeScore
-                 + 0.20 × ReactionScore
-                 + 0.15 × RecencyScore
+        IMPROVED: Increased recency weight from 15% to 35% to prioritize recent
+        support/resistance over old levels. Recent price action is more relevant
+        for take profit targets than old support from years ago.
+
+        TP_SCORE = 0.20 × TouchScore
+                 + 0.20 × VolumeScore
+                 + 0.15 × ReactionScore
+                 + 0.35 × RecencyScore (INCREASED from 0.15)
                  + 0.10 × AlignmentScore
 
         Args:
@@ -507,12 +524,12 @@ class TPScoringEngine:
         recency_score, bars_since = self.calculate_recency_score(indices)
         alignment_score = self.calculate_alignment_score(price_center, harmonic_targets)
 
-        # Weighted final score
+        # Weighted final score - IMPROVED: Recency now 35% (was 15%)
         final_score = (
-            0.30 * touch_score +
-            0.25 * volume_score +
-            0.20 * reaction_score +
-            0.15 * recency_score +
+            0.20 * touch_score +
+            0.20 * volume_score +
+            0.15 * reaction_score +
+            0.35 * recency_score +
             0.10 * alignment_score
         )
 
@@ -579,8 +596,10 @@ class TPScoringEngine:
         for zone_data in candidate_zones:
             tp_zone = self.score_zone(zone_data, harmonic_targets)
 
-            # Only include zones with score >= 50
-            if tp_zone.score >= 50:
+            # IMPROVED: Lowered threshold from 50 to 40
+            # 50 was too restrictive and filtered out valid support/resistance zones
+            # 40 allows more zones while still maintaining quality
+            if tp_zone.score >= 40:
                 all_zones.append(tp_zone)
 
         # Sort by score (highest first)
@@ -643,7 +662,9 @@ class TPScoringEngine:
             pct_diff = abs((zone_price - reference_price) / reference_price) * 100
             return pct_diff >= min_pct
 
-        # Step 1: Select TP1 - Pick highest-scored zone that meets minimum distance from entry
+        # Step 1: Select TP1 - Pick CLOSEST zone that meets minimum distance from entry
+        # IMPROVED: Changed from "highest score" to "closest" to prioritize recent levels
+        # over old heavily-touched zones far from entry
         num_zones = len(zones_by_distance)
         if num_zones == 0:
             return None, None, None
@@ -658,8 +679,10 @@ class TPScoringEngine:
             # No zones meet minimum distance - return None to trigger fallback to fixed method
             return None, None, None
 
-        # Pick highest-scored candidate that meets minimum distance
-        tp1_zone = max(tp1_candidates, key=lambda z: z.score)
+        # IMPROVED: Pick CLOSEST candidate (first in zones_by_distance) not highest score
+        # zones_by_distance is already sorted by proximity, so tp1_candidates[0] is closest
+        # All candidates already have score >= 40 from get_tp_zones filter
+        tp1_zone = tp1_candidates[0]
         tp1 = tp1_zone.price_center
 
         # Step 2: Select TP2 - Must be at least min_spacing_pct away from TP1 in the correct direction
@@ -673,8 +696,8 @@ class TPScoringEngine:
                              if z.price_center < tp1 and meets_spacing(z.price_center, tp1, min_spacing_pct)]
 
         if tp2_candidates:
-            # Pick highest-scored candidate that meets spacing
-            tp2_zone = max(tp2_candidates, key=lambda z: z.score)
+            # IMPROVED: Pick CLOSEST candidate, not highest score
+            tp2_zone = tp2_candidates[0]
             tp2 = tp2_zone.price_center
         else:
             # No zones meet spacing - calculate TP2 based on min_spacing_pct from TP1
@@ -694,8 +717,8 @@ class TPScoringEngine:
                              if z.price_center < tp2 and meets_spacing(z.price_center, tp2, min_spacing_pct)]
 
         if tp3_candidates:
-            # Pick highest-scored candidate that meets spacing from TP2
-            tp3_zone = max(tp3_candidates, key=lambda z: z.score)
+            # IMPROVED: Pick CLOSEST candidate, not highest score
+            tp3_zone = tp3_candidates[0]
             tp3 = tp3_zone.price_center
         else:
             # No zones meet spacing - calculate TP3 based on min_spacing_pct from TP2
