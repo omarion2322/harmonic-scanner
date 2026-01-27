@@ -94,8 +94,9 @@ jobs:
           sed -i "s/DATA_INTERVAL = '.*'/DATA_INTERVAL = '${{ matrix.timeframe }}'/" src/config/config.py
           sed -i "s/TP_STRATEGY = '.*'/TP_STRATEGY = '${{ needs.setup.outputs.tp_strategy }}'/" src/config/config.py
 
+          # Only override MAX_STOCKS_TO_SCAN if explicitly provided
           if [ -n "${{ needs.setup.outputs.max_stocks }}" ]; then
-            sed -i "s/MAX_STOCKS_TO_SCAN = .*/MAX_STOCKS_TO_SCAN = ${{ needs.setup.outputs.max_stocks }}/" src/config/config.py
+            sed -i "s/MAX_STOCKS_TO_SCAN = [0-9]*/MAX_STOCKS_TO_SCAN = ${{ needs.setup.outputs.max_stocks }}/" src/config/config.py
           fi
 
           echo "⚙️ Configuration for ${{ matrix.timeframe }}:"
@@ -104,9 +105,18 @@ jobs:
           grep "MAX_STOCKS_TO_SCAN = " src/config/config.py
 
       - name: Run scan for ${{ matrix.timeframe }}
+        env:
+          PYTHONUNBUFFERED: "1"
         run: |
           echo "🚀 Starting ${{ matrix.timeframe }} scan..."
-          python src/harmonic_scanner.py
+          echo "Configuration:"
+          echo "  - Timeframe: ${{ matrix.timeframe }}"
+          echo "  - Strategy: ${{ needs.setup.outputs.tp_strategy }}"
+          echo "  - Max Stocks: ${{ needs.setup.outputs.max_stocks }}"
+          echo ""
+
+          # Run with unbuffered output so we see progress in real-time
+          python -u src/harmonic_scanner.py
 
       - name: Extract trades
         if: success()
@@ -121,7 +131,7 @@ jobs:
         if: always()
         run: |
           REPORT_DATE=$(date +%Y-%m-%d)
-          REPORT_FILE="reports/$REPORT_DATE/harmonic_report_${REPORT_DATE}.txt"
+          REPORT_FILE="reports/$REPORT_DATE/${{ matrix.timeframe }}/harmonic_report_${REPORT_DATE}_${{ matrix.timeframe }}.txt"
 
           if [ -f "$REPORT_FILE" ]; then
             # Extract statistics
@@ -237,9 +247,16 @@ jobs:
           grep "DATA_INTERVAL = " src/config/config.py
 
       - name: Run crypto scan for ${{ matrix.timeframe }}
+        env:
+          PYTHONUNBUFFERED: "1"
         run: |
           echo "🚀 Starting ${{ matrix.timeframe }} crypto scan..."
-          python scripts/scan_crypto.py
+          echo "Configuration:"
+          echo "  - Timeframe: ${{ matrix.timeframe }}"
+          echo ""
+
+          # Run with unbuffered output
+          python -u scripts/scan_crypto.py
 
       - name: Extract crypto trades
         if: success()
@@ -254,7 +271,7 @@ jobs:
         if: always()
         run: |
           REPORT_DATE=$(date +%Y-%m-%d)
-          REPORT_FILE="crypto_reports/$REPORT_DATE/harmonic_report_${REPORT_DATE}.txt"
+          REPORT_FILE="crypto_reports/$REPORT_DATE/${{ matrix.timeframe }}/harmonic_report_${REPORT_DATE}_${{ matrix.timeframe }}.txt"
 
           if [ -f "$REPORT_FILE" ]; then
             TOTAL=$(grep "Total Stocks Scanned:" "$REPORT_FILE" | grep -o '[0-9]*' || echo "0")
