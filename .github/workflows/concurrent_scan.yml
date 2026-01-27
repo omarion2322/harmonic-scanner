@@ -1,9 +1,9 @@
 name: Concurrent Multi-Timeframe Scan
 
 on:
-  # Scheduled run - 5 minutes after market close, runs BOTH daily and weekly concurrently
+  # Scheduled run - runs BOTH daily and weekly concurrently
   schedule:
-    - cron: '5 21 * * 1-5'  # Mon-Fri at 4:05 PM EST - scans both 1d and 1wk timeframes
+    - cron: '30 22 * * 1-5'  # Mon-Fri at 10:30 PM UTC (5:30 PM EST / 6:30 PM EDT) - scans both 1d and 1wk timeframes
 
   # Manual trigger with multiple timeframe selection
   workflow_dispatch:
