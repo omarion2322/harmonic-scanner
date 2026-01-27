@@ -15,6 +15,9 @@ from carney_patterns import (
     calculate_ipo_target, calculate_382_trailer, calculate_stop_loss,
     calculate_prz_levels
 )
+# Configure matplotlib for thread-safety before importing pyplot
+import matplotlib
+matplotlib.use('Agg')  # Non-interactive backend, thread-safe
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from datetime import datetime

@@ -10,7 +10,7 @@ Edit these settings to customize the scanner behavior without modifying the main
 
 # Choose your trading timeframe - this will automatically load optimized settings
 # Options: '1d' (daily), '3d' (3-day), '1wk' (weekly), '1mo' (monthly)
-DATA_INTERVAL = '1wk'  # <<< CHANGE THIS TO SELECT YOUR TIMEFRAME
+DATA_INTERVAL = '1wk'
 
 # Import timeframe-specific optimized configurations
 from .config_timeframes import get_timeframe_config
@@ -81,7 +81,8 @@ DATA_PERIOD = _TIMEFRAME_CONFIG['DATA_PERIOD']
 # Reduce this to scan newer tickers (e.g., 30 bars), but may reduce pattern quality
 MIN_BARS_REQUIRED = 30
 
-CRYPTO_TICKERS = ['BTC-USD', 'ETH-USD', 'LTC-USD', 'XRP-USD']
+# Deprecated: Use CRYPTOS_TO_SCAN instead (see line 109)
+# CRYPTO_TICKERS = ['BTC-USD', 'ETH-USD', 'LTC-USD', 'XRP-USD']
 
 # ============================================================================
 # SCANNING SETTINGS
@@ -96,7 +97,7 @@ STOCKS_TO_SCAN = 'All'
 
 # Add additional stock tickers to scan (beyond S&P 500)
 # Example: ['TSLA', 'NVDA']
-STOCK_TICKERS = ['ONDS', 'RIVN', 'TIC', 'IQ', 'PANW', 'DOCU', 'LAC', 'URA', 'FRSH', 'EVEX', 'SSYS','BULL','TGT','CROX', 'CLSK', 'TEAM']
+STOCK_TICKERS = ['LAES','ONDS', 'RIVN', 'TIC', 'IQ', 'PANW', 'DOCU', 'LAC', 'URA', 'FRSH', 'EVEX', 'SSYS','BULL','TGT','CROX', 'CLSK', 'TEAM','REMX','SNDK','RGTI']
 
 # ETF universe to scan
 # Set to True to include all leading ETFs (135 total), False to skip ETFs
@@ -106,7 +107,7 @@ SCAN_ETFS = True
 # Set to True to include major commodity futures, False to skip commodities
 SCAN_COMMODITIES = True
 
-CRYPTOS_TO_SCAN = 'Top100'  # Options: 'Top100', 'Top50', 'Top20', or None
+CRYPTOS_TO_SCAN = 'Top500'  # Options: 'Top100', 'Top50', 'Top20', or None
 
 # Volume filtering mode (applies to 'All' Nasdaq mode only)
 # If True: Filter by share volume (MIN_VOLUME_STOCKS)
@@ -125,18 +126,31 @@ MIN_VOLUME_STOCKS = 1_000_000
 
 # Maximum number of stocks to scan (None = all from selected universe)
 # Use a smaller number for testing (e.g., 50)
-MAX_STOCKS_TO_SCAN = 10000  # Set to 50 for testing
+MAX_STOCKS_TO_SCAN = 10000
 
 # Add delay between stock downloads to avoid rate limiting
 # In seconds (0.1 = 100ms, 0.5 = 500ms)
 # Recommended: 0.2-0.3s to avoid rate limiting (adds ~6-10 min for 1800 stocks)
 # Set to 0.0 for fastest scanning (risk of rate limits on large batches)
-DOWNLOAD_DELAY = 0.25
+# With parallel processing enabled, set to 0.0 (each worker has independent connection)
+DOWNLOAD_DELAY = 0.0
 
 # Maximum number of retry attempts for failed downloads
 # Uses exponential backoff: 1s, 2s, 4s delays between retries
 # Recommended: 3 retries (handles temporary network issues and rate limits)
 MAX_DOWNLOAD_RETRIES = 3
+
+# Parallel processing settings
+# Number of parallel workers for scanning tickers
+# Higher values = faster scanning, but more memory/network usage
+# Recommended: 10-20 for most systems, 30-50 for high-performance systems
+# Set to 1 to disable parallel processing (sequential scanning)
+PARALLEL_WORKERS = 20
+
+# Enable/disable parallel processing
+# When True, scan multiple tickers concurrently using ThreadPoolExecutor
+# When False, scan tickers sequentially (slower but uses less resources)
+ENABLE_PARALLEL_PROCESSING = True
 
 
 # ============================================================================
@@ -255,7 +269,7 @@ assert abs(POSITION_SIZE_T1 + POSITION_SIZE_T2 + POSITION_SIZE_T3 - 1.0) < 0.001
 #                Targets much larger timeframes (months to years)
 #                Aims for x2-x5 gains on the asset
 #                Holds through intermediate levels for maximum profit potential
-TP_STRATEGY = 'MITCH'  # <<< CHANGE THIS TO SELECT YOUR TAKE PROFIT STRATEGY
+TP_STRATEGY = 'MITCH'
 
 # ============================================================================
 # HELPER FUNCTIONS
@@ -278,6 +292,27 @@ def get_stock_list() -> list:
         min_volume_usd=MIN_VOLUME_USD,
         min_volume_stocks=MIN_VOLUME_STOCKS,
         filter_by_stock_volume=FILTER_BY_STOCK_VOLUME,
+        download_delay=DOWNLOAD_DELAY,
+        timeframe=DATA_INTERVAL,
+        min_bars=MIN_BARS_REQUIRED
+    )
+
+
+def get_crypto_list() -> list:
+    """
+    Get list of cryptocurrencies to scan based on CRYPTOS_TO_SCAN configuration.
+
+    Returns:
+        List of crypto ticker symbols in Yahoo Finance format (e.g., ['BTC-USD', 'ETH-USD'])
+    """
+    from data.crypto_universe import get_crypto_universe
+
+    if CRYPTOS_TO_SCAN is None or CRYPTOS_TO_SCAN.upper() == 'NONE':
+        return []
+
+    return get_crypto_universe(
+        cryptos_to_scan=CRYPTOS_TO_SCAN,
+        min_volume_usd=MIN_VOLUME_USD,
         download_delay=DOWNLOAD_DELAY,
         timeframe=DATA_INTERVAL,
         min_bars=MIN_BARS_REQUIRED
@@ -318,6 +353,12 @@ def get_settings_summary():
     print(f"  T3 Exit: {POSITION_SIZE_T3*100:.0f}%")
     print()
     print("SCANNING SETTINGS:")
+    # Parallel Processing
+    if ENABLE_PARALLEL_PROCESSING:
+        print(f"  Parallel Processing: Enabled ({PARALLEL_WORKERS} workers)")
+    else:
+        print(f"  Parallel Processing: Disabled (sequential scanning)")
+
     # Stock Universe
     if STOCKS_TO_SCAN and STOCKS_TO_SCAN.upper() != 'NONE':
         if STOCKS_TO_SCAN.upper() == 'ALL':
@@ -344,6 +385,12 @@ def get_settings_summary():
         print(f"  Commodity Universe: All major commodity futures (~25 total)")
     else:
         print(f"  Commodity Universe: Disabled")
+
+    # Crypto Universe
+    if CRYPTOS_TO_SCAN and CRYPTOS_TO_SCAN.upper() != 'NONE':
+        print(f"  Crypto Universe: {CRYPTOS_TO_SCAN} cryptocurrencies by market cap")
+    else:
+        print(f"  Crypto Universe: Disabled")
 
     if STOCKS_TO_SCAN and STOCKS_TO_SCAN.upper() == 'ALL':
         if FILTER_BY_STOCK_VOLUME:

@@ -325,22 +325,27 @@ class PatternTrackerUpdater:
 
         forming_patterns = []
 
-        # Download data with retry logic
-        data_interval = self.config_helper.get('DATA_INTERVAL', '1wk')
-        data_period = self.config_helper.get('DATA_PERIOD', '2y')
-        max_retries = self.config_helper.get_int('MAX_DOWNLOAD_RETRIES', 3)
+        # Use provided df if available and non-empty, otherwise download
+        if df is not None and not df.empty:
+            df_full = df
+        else:
+            # Download data with retry logic
+            data_interval = self.config_helper.get('DATA_INTERVAL', '1wk')
+            data_period = self.config_helper.get('DATA_PERIOD', '2y')
+            max_retries = self.config_helper.get_int('MAX_DOWNLOAD_RETRIES', 3)
 
-        df_full = smart_download_data(
-            ticker=ticker,
-            period=data_period,
-            interval=data_interval,
-            auto_adjust=False,
-            max_retries=max_retries
-        )
+            df_full = smart_download_data(
+                ticker=ticker,
+                period=data_period,
+                interval=data_interval,
+                auto_adjust=False,
+                max_retries=max_retries
+            )
 
         if df_full.empty:
             return forming_patterns
 
+        # Ensure columns are lowercase
         df_full.columns = [c.lower() for c in df_full.columns]
 
         # Search for forming patterns

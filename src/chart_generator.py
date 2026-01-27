@@ -13,6 +13,10 @@ from pathlib import Path
 
 import pandas as pd
 import numpy as np
+
+# Configure matplotlib for thread-safety before importing pyplot
+import matplotlib
+matplotlib.use('Agg')  # Non-interactive backend, thread-safe
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from matplotlib.patches import Rectangle

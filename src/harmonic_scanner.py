@@ -12,6 +12,8 @@ from datetime import datetime
 import warnings
 from typing import List, Dict, Optional, Any
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 from pattern_detector import PatternDetector
 from reaction_detector import ReactionDetector
@@ -280,7 +282,8 @@ class HarmonicScanner:
                 'patterns': patterns,
                 'current_price': current_price,
                 'chart_path': chart_path,
-                'reaction_data': reaction_data
+                'reaction_data': reaction_data,
+                '_df': df  # Include DataFrame for pattern tracker (avoid re-download)
             }
 
         except (ValueError, KeyError) as e:
@@ -368,6 +371,97 @@ class HarmonicScanner:
 
         return tickers
 
+    def _scan_all_tickers_parallel(
+        self,
+        tickers: List[str],
+        results: Dict[str, List[Dict[str, Any]]],
+        progress: ScanProgressTracker,
+        tracker_updater: PatternTrackerUpdater
+    ) -> None:
+        """
+        Scan all tickers in parallel using ThreadPoolExecutor.
+
+        Args:
+            tickers: List of ticker symbols
+            results: Results dictionary to populate
+            progress: Progress tracker
+            tracker_updater: Pattern tracker updater
+        """
+        verbose = self.config_helper.get_bool('VERBOSE_REPORTS', False)
+        max_workers = self.config_helper.get_int('PARALLEL_WORKERS', 20)
+
+        # Thread-safe lock for updating shared results dictionary
+        results_lock = threading.Lock()
+
+        # List to store all analyses for pattern tracker updates (done sequentially after)
+        all_analyses = []
+        analyses_lock = threading.Lock()
+
+        logger.info(f"Starting parallel scan with {max_workers} workers...")
+
+        def scan_ticker_wrapper(ticker: str) -> Dict[str, Any]:
+            """Wrapper function for scanning a single ticker"""
+            try:
+                analysis = self.scan_stock(ticker, verbose=verbose)
+                return analysis
+            except Exception as e:
+                logger.error(f"Unexpected error scanning {ticker}: {e}", exc_info=True)
+                return {
+                    'ticker': ticker,
+                    'signal': 'HOLD',
+                    'reason': f'Error analyzing stock: {str(e)}',
+                    'patterns': [],
+                    'chart_path': None
+                }
+
+        # Submit all ticker scan jobs to thread pool
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Create future-to-ticker mapping
+            future_to_ticker = {
+                executor.submit(scan_ticker_wrapper, ticker): ticker
+                for ticker in tickers
+            }
+
+            # Process completed scans as they finish
+            completed_count = 0
+            for future in as_completed(future_to_ticker):
+                completed_count += 1
+                ticker = future_to_ticker[future]
+
+                try:
+                    analysis = future.result()
+
+                    # Thread-safe update of results
+                    with results_lock:
+                        results[analysis['signal']].append(analysis)
+
+                    # Store for pattern tracker updates (done later)
+                    with analyses_lock:
+                        all_analyses.append(analysis)
+
+                    # Update progress (thread-safe via logger)
+                    progress.update(completed_count, ticker)
+
+                except Exception as e:
+                    logger.error(f"Error processing result for {ticker}: {e}", exc_info=True)
+
+        logger.info("Parallel scanning complete. Updating pattern tracker...")
+
+        # Update pattern tracker sequentially (file I/O is not thread-safe)
+        for analysis in all_analyses:
+            if not self._is_download_failure(analysis):
+                try:
+                    tracker_updater.update_for_ticker(
+                        analysis['ticker'],
+                        analysis.get('patterns', []),
+                        analysis.get('_df'),  # Use already-downloaded DataFrame
+                        smart_download_data
+                    )
+                except Exception as e:
+                    logger.debug(f"Could not update tracker for {analysis['ticker']}: {e}")
+
+        logger.info("Pattern tracker updates complete.")
+
     def _scan_all_tickers(
         self,
         tickers: List[str],
@@ -377,6 +471,34 @@ class HarmonicScanner:
     ) -> None:
         """
         Scan all tickers with progress tracking and pattern tracker updates.
+
+        This method routes to either parallel or sequential scanning based on config.
+
+        Args:
+            tickers: List of ticker symbols
+            results: Results dictionary to populate
+            progress: Progress tracker
+            tracker_updater: Pattern tracker updater
+        """
+        # Check if parallel processing is enabled
+        enable_parallel = self.config_helper.get_bool('ENABLE_PARALLEL_PROCESSING', True)
+
+        if enable_parallel:
+            # Use parallel scanning
+            self._scan_all_tickers_parallel(tickers, results, progress, tracker_updater)
+        else:
+            # Use sequential scanning (original implementation)
+            self._scan_all_tickers_sequential(tickers, results, progress, tracker_updater)
+
+    def _scan_all_tickers_sequential(
+        self,
+        tickers: List[str],
+        results: Dict[str, List[Dict[str, Any]]],
+        progress: ScanProgressTracker,
+        tracker_updater: PatternTrackerUpdater
+    ) -> None:
+        """
+        Scan all tickers sequentially (original implementation).
 
         Args:
             tickers: List of ticker symbols
@@ -399,7 +521,7 @@ class HarmonicScanner:
                 tracker_updater.update_for_ticker(
                     ticker,
                     analysis.get('patterns', []),
-                    None,  # df not needed, updater will download
+                    analysis.get('_df'),  # Use already-downloaded DataFrame
                     smart_download_data
                 )
 
