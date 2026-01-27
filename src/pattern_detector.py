@@ -1180,7 +1180,7 @@ class PatternDetector:
 
         if pattern.is_bullish:
             if current_price < pattern.stop_loss:
-                if verbose:
+                if verbose and pattern_spec:
                     return "HOLD", (
                         f"Stop loss hit for {pattern.pattern_type} pattern (detected {pattern.d.date.date()})\n"
                         f"  Current Price: ${current_price:.2f} < Stop Loss: ${pattern.stop_loss:.2f}\n"
@@ -1191,12 +1191,12 @@ class PatternDetector:
                 else:
                     return "HOLD", (
                         f"Stop loss hit: {pattern.pattern_type} pattern (detected {pattern.d.date.date()}) "
-                        f"- Price ${current_price:.2f} < Stop ${pattern.stop_loss:.2f}, "
-                        f"{pattern_spec.stop_loss_ratio}x XA from ${pattern.x.price:.2f}"
+                        f"- Price ${current_price:.2f} < Stop ${pattern.stop_loss:.2f}"
+                        + (f", {pattern_spec.stop_loss_ratio}x XA from ${pattern.x.price:.2f}" if pattern_spec else "")
                     )
         else:
             if current_price > pattern.stop_loss:
-                if verbose:
+                if verbose and pattern_spec:
                     return "HOLD", (
                         f"Stop loss hit for {pattern.pattern_type} pattern (detected {pattern.d.date.date()})\n"
                         f"  Current Price: ${current_price:.2f} > Stop Loss: ${pattern.stop_loss:.2f}\n"
@@ -1207,8 +1207,8 @@ class PatternDetector:
                 else:
                     return "HOLD", (
                         f"Stop loss hit: {pattern.pattern_type} pattern (detected {pattern.d.date.date()}) "
-                        f"- Price ${current_price:.2f} > Stop ${pattern.stop_loss:.2f}, "
-                        f"{pattern_spec.stop_loss_ratio}x XA from ${pattern.x.price:.2f}"
+                        f"- Price ${current_price:.2f} > Stop ${pattern.stop_loss:.2f}"
+                        + (f", {pattern_spec.stop_loss_ratio}x XA from ${pattern.x.price:.2f}" if pattern_spec else "")
                     )
 
         # Generate signal based on pattern direction
