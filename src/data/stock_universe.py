@@ -46,7 +46,7 @@ def get_sp500_tickers() -> List[str]:
         ]
 
 
-def get_nasdaq_tickers_with_volume(min_volume_usd: float = 1_000_000, timeframe: str = '1d') -> List[str]:
+def get_nasdaq_tickers_with_volume(min_volume_usd: float = 1_000_000, timeframe: str = '1d', limit: int = None) -> List[str]:
     """
     Get Nasdaq tickers filtered by average daily dollar volume (quick filter using current data).
     Much faster than downloading historical data for each ticker.
@@ -54,6 +54,7 @@ def get_nasdaq_tickers_with_volume(min_volume_usd: float = 1_000_000, timeframe:
     Args:
         min_volume_usd: Minimum average daily dollar volume
         timeframe: Timeframe for scanning ('1d', '1wk', '1mo')
+        limit: Maximum number of tickers to return (None = all that meet criteria)
 
     Returns:
         List of Nasdaq ticker symbols meeting volume criteria
@@ -63,7 +64,8 @@ def get_nasdaq_tickers_with_volume(min_volume_usd: float = 1_000_000, timeframe:
     # For the quick filter, we just use the min_volume_usd as-is (daily requirement)
     adjusted_min_volume_usd = min_volume_usd
 
-    print(f"Fetching Nasdaq tickers with volume > ${min_volume_usd:,.0f} USD...")
+    limit_str = f" (limit: {limit})" if limit else ""
+    print(f"Fetching Nasdaq tickers with volume > ${min_volume_usd:,.0f} USD{limit_str}...")
 
     # Try FinViz screener first
     try:
@@ -77,7 +79,13 @@ def get_nasdaq_tickers_with_volume(min_volume_usd: float = 1_000_000, timeframe:
             df = tables[1] if len(tables) > 1 else tables[0]
             if 'Ticker' in df.columns:
                 tickers = [str(t).strip() for t in df['Ticker'].tolist() if pd.notna(t)]
-                print(f"✓ Fetched {len(tickers)} Nasdaq tickers from FinViz screener")
+
+                # Apply limit if specified
+                if limit and len(tickers) > limit:
+                    tickers = tickers[:limit]
+                    print(f"✓ Fetched {len(tickers)} Nasdaq tickers from FinViz screener (limited)")
+                else:
+                    print(f"✓ Fetched {len(tickers)} Nasdaq tickers from FinViz screener")
                 return tickers
     except Exception as e:
         print(f"⚠ FinViz method failed: {e}")
@@ -86,9 +94,11 @@ def get_nasdaq_tickers_with_volume(min_volume_usd: float = 1_000_000, timeframe:
     try:
         print("  Trying NASDAQ API...")
         api_url = 'https://api.nasdaq.com/api/screener/stocks'
+        # Use limit parameter if provided, otherwise fetch all
+        api_limit = str(limit) if limit else '25000'
         params = {
             'tableonly': 'true',
-            'limit': '25000',
+            'limit': api_limit,
             'exchange': 'nasdaq',
             'download': 'true'
         }
@@ -116,16 +126,23 @@ def get_nasdaq_tickers_with_volume(min_volume_usd: float = 1_000_000, timeframe:
 
                     if dollar_volume >= adjusted_min_volume_usd:
                         filtered_tickers.append(row['symbol'])
+                        # Stop if we've reached the limit
+                        if limit and len(filtered_tickers) >= limit:
+                            break
                 except (ValueError, AttributeError):
                     filtered_tickers.append(row['symbol'])
+                    if limit and len(filtered_tickers) >= limit:
+                        break
 
             if filtered_tickers:
                 print(f"✓ Fetched {len(filtered_tickers)} Nasdaq tickers from API (with volume filter)")
                 return filtered_tickers
 
-            # No tickers passed filter, return all
+            # No tickers passed filter, return all (limited)
             all_tickers = [row['symbol'] for row in rows if 'symbol' in row]
-            print(f"⚠ Could not filter by volume, returning all {len(all_tickers)} Nasdaq tickers")
+            if limit and len(all_tickers) > limit:
+                all_tickers = all_tickers[:limit]
+            print(f"⚠ Could not filter by volume, returning {len(all_tickers)} Nasdaq tickers")
             return all_tickers
 
     except Exception as e:
@@ -307,7 +324,12 @@ def get_stock_universe(stocks_to_scan: str = 'SP500',
             else:
                 print(f"Selected: ALL - All Nasdaq stocks (filtered by volume > ${min_volume_usd:,} USD)")
             print()
-            nasdaq_tickers = get_nasdaq_tickers_with_volume(min_volume_usd=min_volume_usd, timeframe=timeframe)
+            # Pass max_stocks to limit initial fetch - much faster!
+            nasdaq_tickers = get_nasdaq_tickers_with_volume(
+                min_volume_usd=min_volume_usd,
+                timeframe=timeframe,
+                limit=max_stocks  # Limit API fetch to max_stocks from the start
+            )
 
             # Apply historical volume validation to ensure stocks consistently meet volume requirements
             # This filters out stocks that may have passed the quick screener but don't have sustained volume
