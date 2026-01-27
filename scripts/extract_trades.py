@@ -220,7 +220,11 @@ def extract_trades(report_date: str = None, timeframe: str = '1wk',
     report_path = base_path / 'reports' / report_date / timeframe / f'harmonic_report_{report_date}_{timeframe}.txt'
 
     if output_file is None:
-        output_file = base_path / 'paper_trades.json'
+        # Use different files for different timeframes
+        if timeframe == '1d':
+            output_file = base_path / 'paper_trades_daily.json'
+        else:
+            output_file = base_path / 'paper_trades.json'
     else:
         output_file = Path(output_file)
 

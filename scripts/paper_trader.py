@@ -312,35 +312,27 @@ def print_trade_status(status: TradeStatus):
     print(f"  Targets: T1: ${status.target1:.2f} | T2: ${status.target2:.2f} | T3: ${status.target3:.2f}")
 
 
-def run_paper_trader(trades_file: str = None, investment_per_trade: float = 10000.0,
-                     update_file: bool = False, filter_status: str = None):
+def process_trades_file(trades_file: Path, investment_per_trade: float, update_file: bool) -> Tuple[List[TradeStatus], List[Dict]]:
     """
-    Run paper trader to check all trades and display results.
+    Process a single trades file and return statuses.
 
     Args:
-        trades_file: Path to paper trades JSON file
+        trades_file: Path to trades JSON file
         investment_per_trade: Dollar amount invested per trade
-        update_file: Whether to update the JSON file with current status
-        filter_status: Only show trades with this status (OPEN, PARTIAL_WIN, etc.)
-    """
-    # Determine file path
-    if trades_file is None:
-        trades_file = Path(__file__).parent.parent / 'paper_trades.json'
-    else:
-        trades_file = Path(trades_file)
+        update_file: Whether to update the JSON file
 
+    Returns:
+        Tuple of (trade_statuses, updated_trades_list)
+    """
     # Load trades
     trades = load_paper_trades(trades_file)
     if not trades:
-        print("No trades to monitor.")
-        return
-
-    print_section_header(f"PAPER TRADING MONITOR - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        return [], []
 
     # Check each trade
     trade_statuses = []
 
-    for i, trade in enumerate(trades, 1):
+    for trade in trades:
         status = check_trade_status(trade, investment_per_trade)
         trade_statuses.append(status)
 
@@ -367,38 +359,99 @@ def run_paper_trader(trades_file: str = None, investment_per_trade: float = 1000
             # Actual stop hit price (can differ from planned due to gaps)
             trade['stop_hit_price'] = float(status.stop_hit_price) if status.stop_hit_price is not None else None
 
-    # Calculate overall statistics
-    total_trades = len(trade_statuses)
-    total_invested = total_trades * investment_per_trade
-    total_pnl = sum(s.total_pnl for s in trade_statuses)
-    total_pnl_percent = (total_pnl / total_invested * 100) if total_invested > 0 else 0
+    return trade_statuses, trades
 
-    # Group by status
-    status_groups = {}
-    for status in trade_statuses:
-        if status.status not in status_groups:
-            status_groups[status.status] = []
-        status_groups[status.status].append(status)
 
-    # Print summary
-    print(f"\nTotal P&L: {format_pnl(total_pnl, total_pnl_percent)} ({total_trades} trades)")
+def run_paper_trader(trades_file: str = None, investment_per_trade: float = 10000.0,
+                     update_file: bool = False, filter_status: str = None):
+    """
+    Run paper trader to check all trades and display results.
 
-    # Print detailed trade statuses
-    if filter_status:
-        filtered_trades = [s for s in trade_statuses if s.status == filter_status]
-        print_section_header(f"TRADES WITH STATUS: {filter_status}")
-        for status in sorted(filtered_trades, key=lambda x: x.total_pnl, reverse=True):
-            print_trade_status(status)
+    Args:
+        trades_file: Path to paper trades JSON file (if None, loads both daily and weekly)
+        investment_per_trade: Dollar amount invested per trade
+        update_file: Whether to update the JSON file with current status
+        filter_status: Only show trades with this status (OPEN, PARTIAL_WIN, etc.)
+    """
+    base_path = Path(__file__).parent.parent
+
+    # Determine which files to process
+    if trades_file is None:
+        # Load both daily and weekly files
+        files_to_process = [
+            (base_path / 'paper_trades_daily.json', 'DAILY (1d)'),
+            (base_path / 'paper_trades.json', 'WEEKLY (1wk)')
+        ]
     else:
-        # Show all trades sorted by P&L
-        print_section_header("Bot Paper Trades - Start Date 15/12/2025")
-        for status in sorted(trade_statuses, key=lambda x: x.total_pnl, reverse=True):
-            print_trade_status(status)
+        # Load specific file
+        files_to_process = [(Path(trades_file), 'CUSTOM')]
 
-    # Save updated trades if requested
-    if update_file:
-        save_paper_trades(trades, trades_file)
-        print(f"\nUpdated trade statuses in {trades_file}")
+    print_section_header(f"PAPER TRADING MONITOR - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+    all_trade_statuses = []
+
+    for file_path, timeframe_label in files_to_process:
+        if not file_path.exists():
+            print(f"\n⚠️  {timeframe_label} file not found: {file_path}")
+            continue
+
+        print(f"\n{'='*80}")
+        print(f"📊 {timeframe_label} TRADES")
+        print(f"{'='*80}")
+
+        # Process this file
+        trade_statuses, trades = process_trades_file(file_path, investment_per_trade, update_file)
+
+        if not trade_statuses:
+            print(f"No trades in {timeframe_label}")
+            continue
+
+        all_trade_statuses.extend(trade_statuses)
+
+        # Calculate statistics for this timeframe
+        total_trades = len(trade_statuses)
+        total_invested = total_trades * investment_per_trade
+        total_pnl = sum(s.total_pnl for s in trade_statuses)
+        total_pnl_percent = (total_pnl / total_invested * 100) if total_invested > 0 else 0
+
+        print(f"\n{timeframe_label} P&L: {format_pnl(total_pnl, total_pnl_percent)} ({total_trades} trades)")
+
+        # Print detailed trade statuses
+        if filter_status:
+            filtered_trades = [s for s in trade_statuses if s.status == filter_status]
+            if filtered_trades:
+                print(f"\n{timeframe_label} - Filtered by status: {filter_status}")
+                for status in sorted(filtered_trades, key=lambda x: x.total_pnl, reverse=True):
+                    print_trade_status(status)
+        else:
+            # Show all trades sorted by P&L
+            for status in sorted(trade_statuses, key=lambda x: x.total_pnl, reverse=True):
+                print_trade_status(status)
+
+        # Save updated trades if requested
+        if update_file:
+            save_paper_trades(trades, file_path)
+            print(f"\n✅ Updated trade statuses in {file_path}")
+
+    # Print overall summary if processing multiple files
+    if len(files_to_process) > 1 and all_trade_statuses:
+        print_section_header("OVERALL SUMMARY")
+        total_trades = len(all_trade_statuses)
+        total_invested = total_trades * investment_per_trade
+        total_pnl = sum(s.total_pnl for s in all_trade_statuses)
+        total_pnl_percent = (total_pnl / total_invested * 100) if total_invested > 0 else 0
+
+        print(f"\nGrand Total P&L: {format_pnl(total_pnl, total_pnl_percent)} ({total_trades} trades across all timeframes)")
+
+        # Status breakdown
+        status_counts = {}
+        for status in all_trade_statuses:
+            status_counts[status.status] = status_counts.get(status.status, 0) + 1
+
+        print("\nStatus Distribution:")
+        for status_name, count in sorted(status_counts.items()):
+            pct = (count / total_trades) * 100
+            print(f"  {status_name}: {count} ({pct:.1f}%)")
 
 
 def parse_arguments():
