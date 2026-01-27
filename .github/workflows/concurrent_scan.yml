@@ -94,8 +94,9 @@ jobs:
           sed -i "s/DATA_INTERVAL = '.*'/DATA_INTERVAL = '${{ matrix.timeframe }}'/" src/config/config.py
           sed -i "s/TP_STRATEGY = '.*'/TP_STRATEGY = '${{ needs.setup.outputs.tp_strategy }}'/" src/config/config.py
 
+          # Only override MAX_STOCKS_TO_SCAN if explicitly provided
           if [ -n "${{ needs.setup.outputs.max_stocks }}" ]; then
-            sed -i "s/MAX_STOCKS_TO_SCAN = .*/MAX_STOCKS_TO_SCAN = ${{ needs.setup.outputs.max_stocks }}/" src/config/config.py
+            sed -i "s/MAX_STOCKS_TO_SCAN = [0-9]*/MAX_STOCKS_TO_SCAN = ${{ needs.setup.outputs.max_stocks }}/" src/config/config.py
           fi
 
           echo "⚙️ Configuration for ${{ matrix.timeframe }}:"
