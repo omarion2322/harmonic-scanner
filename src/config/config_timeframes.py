@@ -18,12 +18,12 @@ Based on practical trading considerations:
 # ============================================================================
 DAILY_CONFIG = {
     'SWING_WINDOW': 4,
-    'MAX_DAYS_SINCE_PATTERN': 7,
+    'MAX_DAYS_SINCE_PATTERN': 30,
     'DATA_PERIOD': '4y',
     'MIN_ALLOWED_STOP_LOSS_PCT': 8.0,
     'MAX_ALLOWED_STOP_LOSS_PCT': 15.0,
-    'MIN_LONG_RISK_REWARD_RATIO': 8.0,   # LONG (BUY) patterns
-    'MIN_SHORT_RISK_REWARD_RATIO': 3.5,  # SHORT (SELL) patterns - lower due to limited downside
+    'MIN_LONG_RISK_REWARD_RATIO': 6.0,   # LONG (BUY) patterns
+    'MIN_SHORT_RISK_REWARD_RATIO': 3.0,  # SHORT (SELL) patterns - lower due to limited downside
     'TIMEFRAME_NOTES': 'Active trading - Quick moves, tight stops, frequent monitoring'
 }
 
@@ -52,8 +52,8 @@ WEEKLY_CONFIG = {
     'DATA_PERIOD': '5y',
     'MIN_ALLOWED_STOP_LOSS_PCT': 8.0,
     'MAX_ALLOWED_STOP_LOSS_PCT': 15.0,
-    'MIN_LONG_RISK_REWARD_RATIO': 10.0,   # LONG (BUY) patterns - Ideal is 10.0
-    'MIN_SHORT_RISK_REWARD_RATIO': 4.0,  # SHORT (SELL) patterns - Ideal is 4.0
+    'MIN_LONG_RISK_REWARD_RATIO': 5.0,   # LONG (BUY) patterns - Ideal is 10.0
+    'MIN_SHORT_RISK_REWARD_RATIO': 3.0,  # SHORT (SELL) patterns - Ideal is 4.0
     'TIMEFRAME_NOTES': 'Swing/Position trading - Multi-week holds, balanced risk/reward'
 }
 

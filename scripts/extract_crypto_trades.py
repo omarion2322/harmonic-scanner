@@ -217,14 +217,10 @@ def extract_trades(report_date: str = None, timeframe: str = '1wk',
         report_date = datetime.now().strftime('%Y-%m-%d')
 
     base_path = Path(__file__).parent.parent
-    report_path = base_path / 'reports' / report_date / timeframe / f'harmonic_report_{report_date}_{timeframe}.txt'
+    report_path = base_path / 'crypto_reports' / report_date / timeframe / f'harmonic_report_{report_date}_{timeframe}.txt'
 
     if output_file is None:
-        # Use different files for different timeframes
-        if timeframe == '1d':
-            output_file = base_path / 'paper_trades_daily.json'
-        else:
-            output_file = base_path / 'paper_trades.json'
+        output_file = base_path / 'crypto_trades.json'
     else:
         output_file = Path(output_file)
 
@@ -233,7 +229,7 @@ def extract_trades(report_date: str = None, timeframe: str = '1wk',
         print(f"Error: Report file not found at {report_path}")
         return
 
-    print(f"Extracting trades from {report_path}")
+    print(f"Extracting crypto trades from {report_path}")
     print(f"Filters: Grade >= {min_grade}, LONG R/R >= {min_long_rr}, SHORT R/R >= {min_short_rr}")
 
     # Parse report
@@ -247,18 +243,23 @@ def extract_trades(report_date: str = None, timeframe: str = '1wk',
     # Merge trades (prevent duplicates)
     added_count = 0
     skipped_count = 0
+    updated_count = 0
 
     for trade in new_trades:
         trade_id = trade.get_unique_id()
 
         if trade_id in existing_trades:
-            # Trade already exists - preserve the earliest found trade
+            # Trade already exists - check if we should update or skip
             existing_trade = existing_trades[trade_id]
 
             if existing_trade['status'] == 'OPEN':
-                # Keep the existing trade unchanged to preserve earliest entry data
-                # This prevents "moving goal posts" where entry prices change on subsequent scans
-                skipped_count += 1
+                # Update the trade with new data, but preserve original dates
+                new_trade_dict = asdict(trade)
+                # Preserve the original extracted_date and detected_date
+                new_trade_dict['extracted_date'] = existing_trade['extracted_date']
+                new_trade_dict['detected_date'] = existing_trade['detected_date']
+                existing_trades[trade_id] = new_trade_dict
+                updated_count += 1
             else:
                 # Trade is closed or stopped out - don't update
                 skipped_count += 1
@@ -269,7 +270,8 @@ def extract_trades(report_date: str = None, timeframe: str = '1wk',
 
     print(f"\nResults:")
     print(f"  Added: {added_count} new trades")
-    print(f"  Skipped: {skipped_count} existing trades (preserving earliest entry data)")
+    print(f"  Updated: {updated_count} existing trades")
+    print(f"  Skipped: {skipped_count} closed/stopped trades")
     print(f"  Total trades: {len(existing_trades)}")
 
     # Save to file
@@ -317,7 +319,7 @@ Examples:
                        help='Minimum R/R for LONG trades (default: 4.0)')
     parser.add_argument('--min-short-rr', type=float, default=4.0,
                        help='Minimum R/R for SHORT trades (default: 4.0)')
-    parser.add_argument('--output', help='Output JSON file path (default: paper_trades.json)')
+    parser.add_argument('--output', help='Output JSON file path (default: crypto_trades.json)')
 
     return parser.parse_args()
 

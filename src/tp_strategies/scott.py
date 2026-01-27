@@ -14,6 +14,7 @@ This is the conservative, rule-based approach tied to pattern geometry.
 
 from tp_strategies.base import TPStrategy, TPTargets
 import pandas as pd
+from typing import Optional
 
 
 class ScottStrategy(TPStrategy):
@@ -35,7 +36,7 @@ class ScottStrategy(TPStrategy):
                          c_price: float,
                          d_price: float,
                          d_index: int,
-                         ticker: str = None) -> TPTargets:
+                         ticker: Optional[str] = None) -> TPTargets:
         """
         Calculate I.P.O. targets using Carney's Fibonacci method.
 

@@ -6,12 +6,22 @@ This module provides centralized utilities for:
 - Path management (PathManager)
 - Pattern and reaction formatting (FormattingUtils)
 - Ticker list management (TickerManager)
+
+Note: Uses pathlib.Path exclusively for all path operations.
 """
 
-import os
 from pathlib import Path
 from datetime import datetime
-from typing import List, Optional, Any
+from typing import List, Optional, Any, TYPE_CHECKING
+from types import ModuleType
+
+from logging_config import get_logger
+
+if TYPE_CHECKING:
+    from pattern_detector import HarmonicPattern
+    from reaction_detector import ReactionData
+
+logger = get_logger(__name__)
 
 
 class ConfigHelper:
@@ -19,9 +29,10 @@ class ConfigHelper:
     Helper class for safe configuration access with defaults.
 
     Eliminates the need for repeated 'hasattr' checks throughout the codebase.
+    Provides type-safe accessors for common configuration value types.
     """
 
-    def __init__(self, config_module):
+    def __init__(self, config_module: ModuleType) -> None:
         """
         Initialize ConfigHelper with a configuration module.
 
@@ -45,7 +56,12 @@ class ConfigHelper:
             >>> config_helper = ConfigHelper(config)
             >>> verbose = config_helper.get('VERBOSE_REPORTS', False)
         """
-        return getattr(self.config, key, default) if hasattr(self.config, key) else default
+        if not hasattr(self.config, key):
+            return default
+
+        value = getattr(self.config, key)
+        # Return default if value is explicitly None
+        return default if value is None else value
 
     def get_bool(self, key: str, default: bool = False) -> bool:
         """
@@ -75,7 +91,8 @@ class ConfigHelper:
         value = self.get(key, default)
         try:
             return int(value) if value is not None else default
-        except (ValueError, TypeError):
+        except (ValueError, TypeError) as e:
+            logger.warning(f"Failed to convert config key '{key}' to int: {e}. Using default: {default}")
             return default
 
     def get_float(self, key: str, default: float = 0.0) -> float:
@@ -92,7 +109,8 @@ class ConfigHelper:
         value = self.get(key, default)
         try:
             return float(value) if value is not None else default
-        except (ValueError, TypeError):
+        except (ValueError, TypeError) as e:
+            logger.warning(f"Failed to convert config key '{key}' to float: {e}. Using default: {default}")
             return default
 
 
@@ -103,7 +121,7 @@ class PathManager:
     Eliminates duplicate path building logic throughout the codebase.
     """
 
-    def __init__(self, project_root: Optional[Path] = None):
+    def __init__(self, project_root: Optional[Path] = None) -> None:
         """
         Initialize PathManager.
 
@@ -111,19 +129,27 @@ class PathManager:
             project_root: Project root directory. If None, auto-detects from src/ directory.
         """
         if project_root is None:
-            # Auto-detect project root (one level up from src/)
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            self.project_root = Path(os.path.dirname(script_dir))
+            # Auto-detect project root (one level up from src/) using pathlib
+            script_path = Path(__file__).resolve()
+            self.project_root = script_path.parent.parent
         else:
             self.project_root = Path(project_root)
 
-    def get_report_dir(self, date: Optional[str] = None, interval: str = '1d') -> Path:
+        logger.debug(f"PathManager initialized with project_root: {self.project_root}")
+
+    def get_report_dir(
+        self,
+        date: Optional[str] = None,
+        interval: str = '1d',
+        asset_type: str = 'stocks'
+    ) -> Path:
         """
         Get the report directory path for a given date and interval.
 
         Args:
             date: Date string in 'YYYY-MM-DD' format. Defaults to today.
             interval: Data interval (e.g., '1d', '1wk', '1mo')
+            asset_type: Asset type - 'stocks' or 'crypto' (determines base directory)
 
         Returns:
             Path to report directory
@@ -132,21 +158,31 @@ class PathManager:
             >>> pm = PathManager()
             >>> report_dir = pm.get_report_dir(interval='1wk')
             >>> # Returns: /path/to/project/reports/2024-01-15/1wk/
+            >>> report_dir = pm.get_report_dir(interval='1wk', asset_type='crypto')
+            >>> # Returns: /path/to/project/crypto_reports/2024-01-15/1wk/
         """
         if date is None:
             date = datetime.now().strftime('%Y-%m-%d')
 
-        report_dir = self.project_root / "reports" / date / interval
+        base_dir = "crypto_reports" if asset_type == 'crypto' else "reports"
+        report_dir = self.project_root / base_dir / date / interval
         report_dir.mkdir(parents=True, exist_ok=True)
+
         return report_dir
 
-    def get_chart_dir(self, date: Optional[str] = None, interval: str = '1d') -> Path:
+    def get_chart_dir(
+        self,
+        date: Optional[str] = None,
+        interval: str = '1d',
+        asset_type: str = 'stocks'
+    ) -> Path:
         """
         Get the chart directory path for a given date and interval.
 
         Args:
             date: Date string in 'YYYY-MM-DD' format. Defaults to today.
             interval: Data interval (e.g., '1d', '1wk', '1mo')
+            asset_type: Asset type - 'stocks' or 'crypto' (determines base directory)
 
         Returns:
             Path to chart directory
@@ -156,7 +192,7 @@ class PathManager:
             >>> chart_dir = pm.get_chart_dir(interval='1wk')
             >>> # Returns: /path/to/project/reports/2024-01-15/1wk/charts/
         """
-        chart_dir = self.get_report_dir(date, interval) / "charts"
+        chart_dir = self.get_report_dir(date, interval, asset_type) / "charts"
         chart_dir.mkdir(parents=True, exist_ok=True)
         return chart_dir
 
@@ -174,8 +210,13 @@ class PathManager:
         tracking_dir.mkdir(parents=True, exist_ok=True)
         return tracking_dir
 
-    def get_report_path(self, date: Optional[str] = None, interval: str = '1d',
-                       verbose: bool = False) -> Path:
+    def get_report_path(
+        self,
+        date: Optional[str] = None,
+        interval: str = '1d',
+        verbose: bool = False,
+        asset_type: str = 'stocks'
+    ) -> Path:
         """
         Get the full path for a report file.
 
@@ -183,6 +224,7 @@ class PathManager:
             date: Date string in 'YYYY-MM-DD' format. Defaults to today.
             interval: Data interval (e.g., '1d', '1wk', '1mo')
             verbose: Whether this is a verbose report
+            asset_type: Asset type - 'stocks' or 'crypto' (determines base directory)
 
         Returns:
             Path to report file
@@ -190,7 +232,7 @@ class PathManager:
         if date is None:
             date = datetime.now().strftime('%Y-%m-%d')
 
-        report_dir = self.get_report_dir(date, interval)
+        report_dir = self.get_report_dir(date, interval, asset_type)
         suffix = "_verbose" if verbose else ""
         filename = f"harmonic_report_{date}_{interval}{suffix}.txt"
         return report_dir / filename
@@ -204,7 +246,7 @@ class FormattingUtils:
     """
 
     @staticmethod
-    def format_pattern_ratios(pattern) -> str:
+    def format_pattern_ratios(pattern: 'HarmonicPattern') -> str:
         """
         Format pattern ratios in a consistent way.
 
@@ -218,10 +260,17 @@ class FormattingUtils:
             >>> ratios = FormattingUtils.format_pattern_ratios(pattern)
             >>> # Returns: "B=0.618, BC_proj=1.272, D=0.786"
         """
-        return f"B={pattern.ab_xa_ratio:.3f}, BC_proj={pattern.bc_projection:.3f}, D={pattern.ad_xa_ratio:.3f}"
+        return (
+            f"B={pattern.ab_xa_ratio:.3f}, "
+            f"BC_proj={pattern.bc_projection:.3f}, "
+            f"D={pattern.ad_xa_ratio:.3f}"
+        )
 
     @staticmethod
-    def format_reaction_status(reaction_data, pattern) -> List[str]:
+    def format_reaction_status(
+        reaction_data: Optional['ReactionData'],
+        pattern: 'HarmonicPattern'
+    ) -> List[str]:
         """
         Format Type 1 and Type 2 reaction status information.
 
@@ -237,7 +286,7 @@ class FormattingUtils:
             >>> for line in lines:
             ...     print(line)
         """
-        lines = []
+        lines: List[str] = []
 
         if not reaction_data:
             return lines
@@ -252,7 +301,7 @@ class FormattingUtils:
             if reaction_data.type1_max_move:
                 price_info = f" - Price reached: ${reaction_data.type1_max_move:.2f}"
 
-            targets_hit = []
+            targets_hit: List[str] = []
             if reaction_data.type1_reached_382:
                 targets_hit.append("38.2% of CD")
             if reaction_data.type1_reached_618:
@@ -289,8 +338,10 @@ class TickerManager:
     """
 
     @staticmethod
-    def merge_ticker_lists(custom_tickers: Optional[List[str]],
-                          universe_tickers: List[str]) -> List[str]:
+    def merge_ticker_lists(
+        custom_tickers: Optional[List[str]],
+        universe_tickers: List[str]
+    ) -> List[str]:
         """
         Merge custom tickers with universe tickers, removing duplicates.
 
@@ -313,22 +364,29 @@ class TickerManager:
         """
         # If no custom tickers, return universe as-is
         if not custom_tickers:
+            logger.debug("No custom tickers provided, using universe tickers only")
             return universe_tickers
 
         # Normalize custom tickers to uppercase
         custom_upper = [t.upper().strip() for t in custom_tickers]
 
         # Filter out universe tickers that are already in custom list
+        custom_upper_set = {c.upper() for c in custom_upper}
         unique_universe = [
             t for t in universe_tickers
-            if t.upper() not in [c.upper() for c in custom_upper]
+            if t.upper() not in custom_upper_set
         ]
+
+        logger.debug(
+            f"Merged {len(custom_upper)} custom tickers with "
+            f"{len(unique_universe)} unique universe tickers"
+        )
 
         # Return custom tickers first, then unique universe tickers
         return custom_upper + unique_universe
 
     @staticmethod
-    def print_custom_ticker_info(custom_tickers: List[str]):
+    def print_custom_ticker_info(custom_tickers: Optional[List[str]]) -> None:
         """
         Print information about custom tickers being scanned first.
 
@@ -336,4 +394,4 @@ class TickerManager:
             custom_tickers: List of custom ticker symbols
         """
         if custom_tickers:
-            print(f"✓ Custom tickers will be scanned first: {', '.join(custom_tickers)}")
+            logger.info(f"Custom tickers will be scanned first: {', '.join(custom_tickers)}")

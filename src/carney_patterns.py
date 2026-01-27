@@ -3,25 +3,60 @@ Scott Carney Harmonic Pattern Specifications
 Exact ratio requirements from Harmonic Trading Volumes 1, 2, and 3
 """
 
-from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
+from pydantic import BaseModel, Field, field_validator
 
 
-@dataclass
-class PatternSpec:
-    """Specification for a harmonic pattern"""
-    name: str
-    b_point_min: float
-    b_point_max: float
-    b_tolerance: float
-    bc_projection_min: float
-    bc_projection_max: float
-    d_point_min: float  # XA ratio
-    d_point_max: float  # XA ratio
-    c_point_min: float  # AB retracement
-    c_point_max: float  # AB retracement
-    stop_loss_ratio: float
-    is_extension: bool  # True if extends beyond X, False if retracement
+class PatternSpec(BaseModel):
+    """Specification for a harmonic pattern with validation."""
+    name: str = Field(..., min_length=1, description="Pattern name")
+    b_point_min: float = Field(..., ge=0.0, le=2.0, description="Minimum B point ratio")
+    b_point_max: float = Field(..., ge=0.0, le=2.0, description="Maximum B point ratio")
+    b_tolerance: float = Field(0.0, ge=0.0, le=0.2, description="B point tolerance")
+    bc_projection_min: float = Field(..., ge=0.0, le=5.0, description="Minimum BC projection")
+    bc_projection_max: float = Field(..., ge=0.0, le=5.0, description="Maximum BC projection")
+    d_point_min: float = Field(..., ge=0.0, le=5.0, description="Minimum D point XA ratio")
+    d_point_max: float = Field(..., ge=0.0, le=5.0, description="Maximum D point XA ratio")
+    c_point_min: float = Field(..., ge=0.0, le=2.0, description="Minimum C point AB retracement")
+    c_point_max: float = Field(..., ge=0.0, le=2.0, description="Maximum C point AB retracement")
+    stop_loss_ratio: float = Field(..., ge=1.0, le=3.0, description="Stop loss ratio")
+    is_extension: bool = Field(..., description="True if extends beyond X, False if retracement")
+
+    @field_validator('b_point_max')
+    @classmethod
+    def validate_b_point_max(cls, v: float, info) -> float:
+        """Ensure b_point_max >= b_point_min."""
+        if 'b_point_min' in info.data and v < info.data['b_point_min']:
+            raise ValueError(f'b_point_max ({v}) must be >= b_point_min ({info.data["b_point_min"]})')
+        return v
+
+    @field_validator('bc_projection_max')
+    @classmethod
+    def validate_bc_projection_max(cls, v: float, info) -> float:
+        """Ensure bc_projection_max >= bc_projection_min."""
+        if 'bc_projection_min' in info.data and v < info.data['bc_projection_min']:
+            raise ValueError(f'bc_projection_max ({v}) must be >= bc_projection_min ({info.data["bc_projection_min"]})')
+        return v
+
+    @field_validator('d_point_max')
+    @classmethod
+    def validate_d_point_max(cls, v: float, info) -> float:
+        """Ensure d_point_max >= d_point_min."""
+        if 'd_point_min' in info.data and v < info.data['d_point_min']:
+            raise ValueError(f'd_point_max ({v}) must be >= d_point_min ({info.data["d_point_min"]})')
+        return v
+
+    @field_validator('c_point_max')
+    @classmethod
+    def validate_c_point_max(cls, v: float, info) -> float:
+        """Ensure c_point_max >= c_point_min."""
+        if 'c_point_min' in info.data and v < info.data['c_point_min']:
+            raise ValueError(f'c_point_max ({v}) must be >= c_point_min ({info.data["c_point_min"]})')
+        return v
+
+    class Config:
+        frozen = True  # Make immutable like dataclass with frozen=True
+        str_strip_whitespace = True
 
 
 # Carney's Exact Pattern Specifications from Volumes 1-3

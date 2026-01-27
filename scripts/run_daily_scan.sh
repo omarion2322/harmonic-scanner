@@ -83,7 +83,11 @@ if [ $? -eq 0 ]; then
     # Extract trades for paper trading
     echo "" | tee -a "$LOG_FILE"
     echo "Extracting trades for paper trading..." | tee -a "$LOG_FILE"
-    "$PYTHON_PATH" "$PROJECT_DIR/scripts/extract_trades.py" --date "$DATE" --timeframe 1wk 2>&1 | tee -a "$LOG_FILE"
+
+    # Get timeframe from config.py DATA_INTERVAL
+    TIMEFRAME=$("$PYTHON_PATH" -c "import sys; sys.path.insert(0, '$PROJECT_DIR/src'); from config import DATA_INTERVAL; print(DATA_INTERVAL)")
+
+    "$PYTHON_PATH" "$PROJECT_DIR/scripts/extract_trades.py" --date "$DATE" --timeframe "$TIMEFRAME" 2>&1 | tee -a "$LOG_FILE"
 
     # Optional: Send email notification (requires mailx or mail command)
     # Uncomment and configure if you want email alerts
