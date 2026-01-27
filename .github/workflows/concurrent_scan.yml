@@ -131,7 +131,7 @@ jobs:
         if: always()
         run: |
           REPORT_DATE=$(date +%Y-%m-%d)
-          REPORT_FILE="reports/$REPORT_DATE/harmonic_report_${REPORT_DATE}.txt"
+          REPORT_FILE="reports/$REPORT_DATE/${{ matrix.timeframe }}/harmonic_report_${REPORT_DATE}_${{ matrix.timeframe }}.txt"
 
           if [ -f "$REPORT_FILE" ]; then
             # Extract statistics
@@ -271,7 +271,7 @@ jobs:
         if: always()
         run: |
           REPORT_DATE=$(date +%Y-%m-%d)
-          REPORT_FILE="crypto_reports/$REPORT_DATE/harmonic_report_${REPORT_DATE}.txt"
+          REPORT_FILE="crypto_reports/$REPORT_DATE/${{ matrix.timeframe }}/harmonic_report_${REPORT_DATE}_${{ matrix.timeframe }}.txt"
 
           if [ -f "$REPORT_FILE" ]; then
             TOTAL=$(grep "Total Stocks Scanned:" "$REPORT_FILE" | grep -o '[0-9]*' || echo "0")
