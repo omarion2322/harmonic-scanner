@@ -385,11 +385,21 @@ class HarmonicScanner:
         Returns:
             List of ticker symbols
         """
-        # Get ticker list using new stock universe system
+        # Get custom tickers first
+        custom_tickers = self.config_helper.get('STOCK_TICKERS')
+
+        # If we have enough custom tickers to meet max_stocks, use only those
+        if custom_tickers and max_stocks and len(custom_tickers) >= max_stocks:
+            tickers = [t.upper().strip() for t in custom_tickers[:max_stocks]]
+            logger.info("Using only custom tickers (%d of %d): %s",
+                       len(tickers), len(custom_tickers), ', '.join(tickers))
+            TickerManager.print_custom_ticker_info(custom_tickers[:max_stocks])
+            return tickers
+
+        # Otherwise, get ticker list from universe and merge
         tickers = config.get_stock_list()
 
         # Merge custom tickers with universe using TickerManager
-        custom_tickers = self.config_helper.get('STOCK_TICKERS')
         tickers = TickerManager.merge_ticker_lists(custom_tickers, tickers)
         TickerManager.print_custom_ticker_info(custom_tickers)
 
