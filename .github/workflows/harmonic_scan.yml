@@ -1,4 +1,4 @@
-name: Concurrent Multi-Timeframe Scan
+name: Harmonic Scan
 
 on:
   # Scheduled run - runs BOTH daily and weekly concurrently
