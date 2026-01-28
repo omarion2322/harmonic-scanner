@@ -199,141 +199,8 @@ jobs:
 
             DESCRIPTION="**Timeframe:** $TIMEFRAME\\n**Strategy:** $TP_STRATEGY\\n**Total Scanned:** $TOTAL\\n\\n🟢 **BUY Signals:** $BUY\\n🔴 **SELL Signals:** $SELL"
 
-            # Parse detailed signal information and create payload
-            python3 << 'PYEOF' > "discord_payload_$TIMEFRAME.json"
-import re
-import json
-import os
-
-def parse_signals(filename, signal_type, max_signals=3):
-    """Parse detailed signal information from report"""
-    signals = []
-    with open(filename, 'r') as f:
-        content = f.read()
-
-    # Find the section for this signal type
-    section_marker = f"{signal_type} SIGNALS"
-    if section_marker not in content:
-        return signals
-
-    # Split by the separator lines
-    parts = content.split('=' * 80)
-    in_section = False
-
-    for part in parts:
-        if section_marker in part:
-            in_section = True
-            continue
-
-        if in_section:
-            # Check if we've moved to a different section
-            if 'SIGNALS' in part and signal_type not in part:
-                break
-
-            # Parse ticker info
-            ticker_match = re.search(r'Ticker:\s+(\S+)', part)
-            if not ticker_match:
-                continue
-
-            ticker = ticker_match.group(1)
-
-            # Extract key information
-            price_match = re.search(r'Current Price:\s+\$([0-9.]+)', part)
-            analysis_match = re.search(r'Analysis:\s+(\w+)\s+([\w-]+)\s+-\s+Grade\s+([A-F][+-]?)\s+-\s+Detected\s+([\d-]+)', part)
-            entry_match = re.search(r'Entry:\s+\$([0-9.]+)', part)
-            stop_match = re.search(r'Stop(?:\sLoss)?:\s+\$([0-9.]+)', part)
-            t1_match = re.search(r'T(?:arget\s)?1:\s+\$([0-9.]+)', part)
-            t2_match = re.search(r'T(?:arget\s)?2:\s+\$([0-9.]+)', part)
-            t3_match = re.search(r'T(?:arget\s)?3:\s+\$([0-9.]+)', part)
-            rr_match = re.search(r'Risk/Reward:\s+([0-9.]+):1', part)
-
-            if analysis_match and entry_match:
-                signal = {
-                    'ticker': ticker,
-                    'price': price_match.group(1) if price_match else 'N/A',
-                    'direction': analysis_match.group(1),
-                    'pattern': analysis_match.group(2),
-                    'grade': analysis_match.group(3),
-                    'entry': entry_match.group(1),
-                    'stop': stop_match.group(1) if stop_match else 'N/A',
-                    't1': t1_match.group(1) if t1_match else 'N/A',
-                    't2': t2_match.group(1) if t2_match else 'N/A',
-                    't3': t3_match.group(1) if t3_match else 'N/A',
-                    'rr': rr_match.group(1) if rr_match else 'N/A'
-                }
-                signals.append(signal)
-
-                if len(signals) >= max_signals:
-                    break
-
-    return signals
-
-# Parse BUY and SELL signals
-report_file = os.environ.get('REPORT_FILE')
-buy_signals = parse_signals(report_file, "BUY", max_signals=3)
-sell_signals = parse_signals(report_file, "SELL", max_signals=3)
-
-fields = []
-
-# Add BUY signals as fields
-for sig in buy_signals:
-    value = (
-        f"**Current Price:** \${sig['price']}\\n"
-        f"**Pattern:** {sig['pattern']} ({sig['direction']}) - Grade {sig['grade']}\\n"
-        f"**Entry:** \${sig['entry']} | **Stop:** \${sig['stop']}\\n"
-        f"**T1:** \${sig['t1']} | **T2:** \${sig['t2']} | **T3:** \${sig['t3']}\\n"
-        f"**Risk/Reward:** {sig['rr']}:1"
-    )
-    fields.append({
-        "name": f"🟢 {sig['ticker']}",
-        "value": value,
-        "inline": False
-    })
-
-# Add SELL signals as fields
-for sig in sell_signals:
-    value = (
-        f"**Current Price:** \${sig['price']}\\n"
-        f"**Pattern:** {sig['pattern']} ({sig['direction']}) - Grade {sig['grade']}\\n"
-        f"**Entry:** \${sig['entry']} | **Stop:** \${sig['stop']}\\n"
-        f"**T1:** \${sig['t1']} | **T2:** \${sig['t2']} | **T3:** \${sig['t3']}\\n"
-        f"**Risk/Reward:** {sig['rr']}:1"
-    )
-    fields.append({
-        "name": f"🔴 {sig['ticker']}",
-        "value": value,
-        "inline": False
-    })
-
-# Build payload
-title = os.environ.get('TITLE')
-description = os.environ.get('DESCRIPTION')
-color = int(os.environ.get('COLOR'))
-timestamp = os.environ.get('TIMESTAMP')
-
-payload = {
-    "embeds": [{
-        "title": title,
-        "description": description,
-        "color": color,
-        "fields": fields,
-        "footer": {"text": "Harmonic Pattern Scanner"},
-        "timestamp": timestamp
-    }]
-}
-
-print(json.dumps(payload))
-PYEOF
-
-            # Export variables for Python script
-            export REPORT_FILE="$REPORT_FILE"
-            export TITLE="$TITLE"
-            export DESCRIPTION="$DESCRIPTION"
-            export COLOR="$COLOR"
-            export TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
-
-            # Run Python script to generate payload
-            python3 << 'PYEOF' > "discord_payload_$TIMEFRAME.json"
+            # Create Python script to parse signals
+            cat > parse_signals.py << 'PYEOF'
 import re
 import json
 import os
@@ -425,6 +292,10 @@ payload = {
 
 print(json.dumps(payload))
 PYEOF
+
+            # Run Python script with environment variables
+            REPORT_FILE="$REPORT_FILE" TITLE="$TITLE" DESCRIPTION="$DESCRIPTION" COLOR="$COLOR" TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" \
+              python3 parse_signals.py > "discord_payload_$TIMEFRAME.json"
 
             # Send Discord notification
             curl -H "Content-Type: application/json" \
@@ -531,15 +402,8 @@ PYEOF
 
             DESCRIPTION="**Timeframe:** $TIMEFRAME\\n**Total Scanned:** $TOTAL cryptocurrencies\\n\\n🟢 **BUY Signals:** $BUY\\n🔴 **SELL Signals:** $SELL"
 
-            # Export variables for Python script
-            export REPORT_FILE="$REPORT_FILE"
-            export TITLE="$TITLE"
-            export DESCRIPTION="$DESCRIPTION"
-            export COLOR="$COLOR"
-            export TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
-
-            # Parse detailed signal information and create payload
-            python3 << 'PYEOF' > "discord_crypto_payload_$TIMEFRAME.json"
+            # Create Python script to parse crypto signals
+            cat > parse_crypto_signals.py << 'PYEOF'
 import re
 import json
 import os
@@ -631,6 +495,10 @@ payload = {
 
 print(json.dumps(payload))
 PYEOF
+
+            # Run Python script with environment variables
+            REPORT_FILE="$REPORT_FILE" TITLE="$TITLE" DESCRIPTION="$DESCRIPTION" COLOR="$COLOR" TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" \
+              python3 parse_crypto_signals.py > "discord_crypto_payload_$TIMEFRAME.json"
 
             # Send Discord notification
             curl -H "Content-Type: application/json" \
