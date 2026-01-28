@@ -197,7 +197,7 @@ jobs:
               TITLE="📊 $TIMEFRAME Scan Complete"
             fi
 
-            DESCRIPTION="**Timeframe:** $TIMEFRAME\\n**Strategy:** $TP_STRATEGY\\n**Total Scanned:** $TOTAL\\n\\n🟢 **BUY Signals:** $BUY\\n🔴 **SELL Signals:** $SELL"
+            DESCRIPTION=$'**Timeframe:** '"$TIMEFRAME"$'\n**Strategy:** '"$TP_STRATEGY"$'\n**Total Scanned:** '"$TOTAL"$'\n\n🟢 **BUY Signals:** '"$BUY"$'\n🔴 **SELL Signals:** '"$SELL"
 
 
             # Run Python script to parse signals and create Discord payload
@@ -307,7 +307,7 @@ jobs:
               TITLE="📊 🪙 $TIMEFRAME Crypto Scan Complete"
             fi
 
-            DESCRIPTION="**Timeframe:** $TIMEFRAME\\n**Total Scanned:** $TOTAL cryptocurrencies\\n\\n🟢 **BUY Signals:** $BUY\\n🔴 **SELL Signals:** $SELL"
+            DESCRIPTION=$'**Timeframe:** '"$TIMEFRAME"$'\n**Total Scanned:** '"$TOTAL"$' cryptocurrencies\n\n🟢 **BUY Signals:** '"$BUY"$'\n🔴 **SELL Signals:** '"$SELL"
 
 
             # Run Python script to parse crypto signals and create Discord payload

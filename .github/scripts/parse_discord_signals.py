@@ -67,21 +67,21 @@ fields = []
 for sig in buy_signals:
     fields.append({
         "name": f"🟢 {sig['ticker']}",
-        "value": f"**Current Price:** ${sig['price']}\\n**Pattern:** {sig['pattern']} ({sig['direction']}) - Grade {sig['grade']}\\n**Entry:** ${sig['entry']} | **Stop:** ${sig['stop']}\\n**T1:** ${sig['t1']} | **T2:** ${sig['t2']} | **T3:** ${sig['t3']}\\n**Risk/Reward:** {sig['rr']}:1",
+        "value": f"**Current Price:** ${sig['price']}\n**Pattern:** {sig['pattern']} ({sig['direction']}) - Grade {sig['grade']}\n**Entry:** ${sig['entry']} | **Stop:** ${sig['stop']}\n**T1:** ${sig['t1']} | **T2:** ${sig['t2']} | **T3:** ${sig['t3']}\n**Risk/Reward:** {sig['rr']}:1",
         "inline": False
     })
 
 for sig in sell_signals:
     fields.append({
         "name": f"🔴 {sig['ticker']}",
-        "value": f"**Current Price:** ${sig['price']}\\n**Pattern:** {sig['pattern']} ({sig['direction']}) - Grade {sig['grade']}\\n**Entry:** ${sig['entry']} | **Stop:** ${sig['stop']}\\n**T1:** ${sig['t1']} | **T2:** ${sig['t2']} | **T3:** ${sig['t3']}\\n**Risk/Reward:** {sig['rr']}:1",
+        "value": f"**Current Price:** ${sig['price']}\n**Pattern:** {sig['pattern']} ({sig['direction']}) - Grade {sig['grade']}\n**Entry:** ${sig['entry']} | **Stop:** ${sig['stop']}\n**T1:** ${sig['t1']} | **T2:** ${sig['t2']} | **T3:** ${sig['t3']}\n**Risk/Reward:** {sig['rr']}:1",
         "inline": False
     })
 
 payload = {
     "embeds": [{
         "title": os.environ['TITLE'],
-        "description": os.environ['DESCRIPTION'],
+        "description": os.environ['DESCRIPTION'].replace('\\n', '\n'),
         "color": int(os.environ['COLOR']),
         "fields": fields,
         "footer": {"text": "Harmonic Pattern Scanner"},
