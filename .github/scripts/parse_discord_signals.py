@@ -38,6 +38,8 @@ def parse_signals(filename, signal_type, max_signals=3):
             t2_match = re.search(r'T(?:arget\s)?2:\s+\$([0-9.]+)', part)
             t3_match = re.search(r'T(?:arget\s)?3:\s+\$([0-9.]+)', part)
             rr_match = re.search(r'Risk/Reward:\s+([0-9.]+):1', part)
+            prz_match = re.search(r'Entry Zone \(PRZ\):\s+\$([0-9.]+)\s+-\s+\$([0-9.]+)', part)
+            tp_strategy_match = re.search(r'TP Targets:\s+(\w+)', part)
 
             if analysis_match and entry_match:
                 signal = {
@@ -51,7 +53,10 @@ def parse_signals(filename, signal_type, max_signals=3):
                     't1': t1_match.group(1) if t1_match else 'N/A',
                     't2': t2_match.group(1) if t2_match else 'N/A',
                     't3': t3_match.group(1) if t3_match else 'N/A',
-                    'rr': rr_match.group(1) if rr_match else 'N/A'
+                    'rr': rr_match.group(1) if rr_match else 'N/A',
+                    'prz_low': prz_match.group(1) if prz_match else None,
+                    'prz_high': prz_match.group(2) if prz_match else None,
+                    'tp_strategy': tp_strategy_match.group(1) if tp_strategy_match else 'N/A'
                 }
                 signals.append(signal)
                 if len(signals) >= max_signals:
@@ -65,16 +70,38 @@ sell_signals = parse_signals(os.environ['REPORT_FILE'], "SELL", 3)
 
 fields = []
 for sig in buy_signals:
+    # Build entry zone text
+    entry_zone = f"${sig['prz_low']} - ${sig['prz_high']}" if sig['prz_low'] and sig['prz_high'] else f"${sig['entry']}"
+
+    value = (
+        f"**Current Price:** ${sig['price']}\n"
+        f"**Pattern:** {sig['pattern']} ({sig['direction']}) - Grade {sig['grade']}\n"
+        f"**Entry Zone:** {entry_zone}\n"
+        f"**Entry:** ${sig['entry']} | **Stop:** ${sig['stop']}\n"
+        f"**T1:** ${sig['t1']} | **T2:** ${sig['t2']} | **T3:** ${sig['t3']}\n"
+        f"**Risk/Reward:** {sig['rr']}:1 | **TP Strategy:** {sig['tp_strategy']}"
+    )
     fields.append({
         "name": f"🟢 {sig['ticker']}",
-        "value": f"**Current Price:** ${sig['price']}\n**Pattern:** {sig['pattern']} ({sig['direction']}) - Grade {sig['grade']}\n**Entry:** ${sig['entry']} | **Stop:** ${sig['stop']}\n**T1:** ${sig['t1']} | **T2:** ${sig['t2']} | **T3:** ${sig['t3']}\n**Risk/Reward:** {sig['rr']}:1",
+        "value": value,
         "inline": False
     })
 
 for sig in sell_signals:
+    # Build entry zone text
+    entry_zone = f"${sig['prz_low']} - ${sig['prz_high']}" if sig['prz_low'] and sig['prz_high'] else f"${sig['entry']}"
+
+    value = (
+        f"**Current Price:** ${sig['price']}\n"
+        f"**Pattern:** {sig['pattern']} ({sig['direction']}) - Grade {sig['grade']}\n"
+        f"**Entry Zone:** {entry_zone}\n"
+        f"**Entry:** ${sig['entry']} | **Stop:** ${sig['stop']}\n"
+        f"**T1:** ${sig['t1']} | **T2:** ${sig['t2']} | **T3:** ${sig['t3']}\n"
+        f"**Risk/Reward:** {sig['rr']}:1 | **TP Strategy:** {sig['tp_strategy']}"
+    )
     fields.append({
         "name": f"🔴 {sig['ticker']}",
-        "value": f"**Current Price:** ${sig['price']}\n**Pattern:** {sig['pattern']} ({sig['direction']}) - Grade {sig['grade']}\n**Entry:** ${sig['entry']} | **Stop:** ${sig['stop']}\n**T1:** ${sig['t1']} | **T2:** ${sig['t2']} | **T3:** ${sig['t3']}\n**Risk/Reward:** {sig['rr']}:1",
+        "value": value,
         "inline": False
     })
 
