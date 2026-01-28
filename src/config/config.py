@@ -129,11 +129,11 @@ MIN_VOLUME_STOCKS = 1_000_000
 MAX_STOCKS_TO_SCAN = 10000
 
 # Add delay between stock downloads to avoid rate limiting
-# In seconds (0.1 = 100ms, 0.5 = 500ms)
-# Recommended: 0.2-0.3s to avoid rate limiting (adds ~6-10 min for 1800 stocks)
-# Set to 0.0 for fastest scanning (risk of rate limits on large batches)
-# With parallel processing enabled, set to 0.0 (each worker has independent connection)
-DOWNLOAD_DELAY = 0.0
+# Yahoo Finance limit: 60 requests per minute (1 request per second)
+# With parallel workers: total_rate = workers / delay
+# Formula: delay = workers / 60 requests_per_min = workers / 1 request_per_sec
+# Example: 10 workers with 10s delay = 60 requests/min (at the limit)
+DOWNLOAD_DELAY = 10.0
 
 # Maximum number of retry attempts for failed downloads
 # Uses exponential backoff: 1s, 2s, 4s delays between retries
@@ -142,15 +142,21 @@ MAX_DOWNLOAD_RETRIES = 3
 
 # Parallel processing settings
 # Number of parallel workers for scanning tickers
-# Higher values = faster scanning, but more memory/network usage
-# Recommended: 10-20 for most systems, 30-50 for high-performance systems
-# Set to 1 to disable parallel processing (sequential scanning)
-PARALLEL_WORKERS = 20
+# Yahoo Finance rate limit: 60 requests/min
+# To stay under limit: workers × (60 / DOWNLOAD_DELAY) <= 60
+# With DOWNLOAD_DELAY=10.0: 10 workers = 60 req/min (optimal)
+PARALLEL_WORKERS = 10
 
 # Enable/disable parallel processing
 # When True, scan multiple tickers concurrently using ThreadPoolExecutor
 # When False, scan tickers sequentially (slower but uses less resources)
 ENABLE_PARALLEL_PROCESSING = True
+
+# Parallel processing mode
+# 'thread' - Use ThreadPoolExecutor (I/O-bound tasks like downloads, shares memory)
+# 'process' - Use ProcessPoolExecutor (bypasses GIL for CPU-bound tasks)
+# Recommended: 'thread' - downloads are I/O-bound, avoids rate limit issues
+PARALLEL_MODE = 'thread'
 
 
 # ============================================================================
@@ -355,7 +361,8 @@ def get_settings_summary():
     print("SCANNING SETTINGS:")
     # Parallel Processing
     if ENABLE_PARALLEL_PROCESSING:
-        print(f"  Parallel Processing: Enabled ({PARALLEL_WORKERS} workers)")
+        mode_desc = "processes (bypasses GIL)" if PARALLEL_MODE == 'process' else "threads (I/O-bound)"
+        print(f"  Parallel Processing: Enabled ({PARALLEL_WORKERS} {mode_desc})")
     else:
         print(f"  Parallel Processing: Disabled (sequential scanning)")
 
