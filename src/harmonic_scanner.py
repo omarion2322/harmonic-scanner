@@ -12,8 +12,9 @@ from datetime import datetime
 import warnings
 from typing import List, Dict, Optional, Any
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 import threading
+import multiprocessing
 
 from pattern_detector import PatternDetector
 from reaction_detector import ReactionDetector
@@ -58,6 +59,34 @@ def smart_download_data(ticker: str, **kwargs) -> pd.DataFrame:
 warnings.filterwarnings('ignore')
 
 logger.info("Modules loaded successfully")
+
+
+def _scan_single_ticker(ticker: str, verbose: bool = False, asset_type: str = 'stocks') -> Dict[str, Any]:
+    """
+    Module-level function for scanning a single ticker (used by ProcessPoolExecutor).
+
+    This function must be at module level to be picklable for multiprocessing.
+
+    Args:
+        ticker: Stock ticker symbol
+        verbose: Whether to generate verbose reports
+        asset_type: Asset type ('stocks' or 'crypto')
+
+    Returns:
+        Analysis dictionary
+    """
+    try:
+        scanner = HarmonicScanner(asset_type=asset_type)
+        return scanner.scan_stock(ticker, verbose=verbose)
+    except Exception as e:
+        logger.error(f"Unexpected error scanning {ticker}: {e}", exc_info=True)
+        return {
+            'ticker': ticker,
+            'signal': 'HOLD',
+            'reason': f'Error analyzing stock: {str(e)}',
+            'patterns': [],
+            'chart_path': None
+        }
 
 # Import configuration
 try:
@@ -379,7 +408,7 @@ class HarmonicScanner:
         tracker_updater: PatternTrackerUpdater
     ) -> None:
         """
-        Scan all tickers in parallel using ThreadPoolExecutor.
+        Scan all tickers in parallel using ThreadPoolExecutor or ProcessPoolExecutor.
 
         Args:
             tickers: List of ticker symbols
@@ -389,36 +418,51 @@ class HarmonicScanner:
         """
         verbose = self.config_helper.get_bool('VERBOSE_REPORTS', False)
         max_workers = self.config_helper.get_int('PARALLEL_WORKERS', 20)
-
-        # Thread-safe lock for updating shared results dictionary
-        results_lock = threading.Lock()
+        parallel_mode = self.config_helper.get('PARALLEL_MODE', 'thread')
 
         # List to store all analyses for pattern tracker updates (done sequentially after)
         all_analyses = []
-        analyses_lock = threading.Lock()
 
-        logger.info(f"Starting parallel scan with {max_workers} workers...")
+        # Choose executor type based on mode
+        if parallel_mode == 'process':
+            executor_class = ProcessPoolExecutor
+            # Limit workers to CPU count for processes
+            max_workers = min(max_workers, multiprocessing.cpu_count())
+            logger.info(f"Starting parallel scan with {max_workers} processes (CPU-bound mode)...")
 
-        def scan_ticker_wrapper(ticker: str) -> Dict[str, Any]:
-            """Wrapper function for scanning a single ticker"""
-            try:
-                analysis = self.scan_stock(ticker, verbose=verbose)
-                return analysis
-            except Exception as e:
-                logger.error(f"Unexpected error scanning {ticker}: {e}", exc_info=True)
-                return {
-                    'ticker': ticker,
-                    'signal': 'HOLD',
-                    'reason': f'Error analyzing stock: {str(e)}',
-                    'patterns': [],
-                    'chart_path': None
-                }
+            # For ProcessPoolExecutor, use module-level function
+            from functools import partial
+            scan_func = partial(_scan_single_ticker, verbose=verbose, asset_type=self.asset_type)
+        else:
+            executor_class = ThreadPoolExecutor
+            logger.info(f"Starting parallel scan with {max_workers} threads (I/O-bound mode)...")
 
-        # Submit all ticker scan jobs to thread pool
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Thread-safe lock for updating shared results dictionary
+            results_lock = threading.Lock()
+            analyses_lock = threading.Lock()
+
+            # For ThreadPoolExecutor, use instance method
+            def scan_ticker_wrapper(ticker: str) -> Dict[str, Any]:
+                """Wrapper function for scanning a single ticker"""
+                try:
+                    analysis = self.scan_stock(ticker, verbose=verbose)
+                    return analysis
+                except Exception as e:
+                    logger.error(f"Unexpected error scanning {ticker}: {e}", exc_info=True)
+                    return {
+                        'ticker': ticker,
+                        'signal': 'HOLD',
+                        'reason': f'Error analyzing stock: {str(e)}',
+                        'patterns': [],
+                        'chart_path': None
+                    }
+            scan_func = scan_ticker_wrapper
+
+        # Submit all ticker scan jobs to executor
+        with executor_class(max_workers=max_workers) as executor:
             # Create future-to-ticker mapping
             future_to_ticker = {
-                executor.submit(scan_ticker_wrapper, ticker): ticker
+                executor.submit(scan_func, ticker): ticker
                 for ticker in tickers
             }
 
@@ -431,12 +475,15 @@ class HarmonicScanner:
                 try:
                     analysis = future.result()
 
-                    # Thread-safe update of results
-                    with results_lock:
+                    # Update results (thread-safe for threads, no sharing for processes)
+                    if parallel_mode == 'thread':
+                        with results_lock:
+                            results[analysis['signal']].append(analysis)
+                        with analyses_lock:
+                            all_analyses.append(analysis)
+                    else:
+                        # For processes, direct append (no sharing between processes)
                         results[analysis['signal']].append(analysis)
-
-                    # Store for pattern tracker updates (done later)
-                    with analyses_lock:
                         all_analyses.append(analysis)
 
                     # Update progress (thread-safe via logger)
