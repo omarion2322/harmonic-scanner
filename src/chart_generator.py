@@ -352,7 +352,7 @@ class ChartGenerator:
             # Price label below point
             ax.text(
                 date, price - y_offset,
-                f'${price:.2f}',
+                f'\\${price:.2f}',
                 fontsize=9,
                 ha='center',
                 va='top',
@@ -618,7 +618,7 @@ class ChartGenerator:
             fontweight='bold'
         )
         ax.set_xlabel('Date', fontsize=12)
-        ax.set_ylabel('Price ($)', fontsize=12)
+        ax.set_ylabel('Price (\\$)', fontsize=12)
 
     def _add_info_box(
         self,
@@ -638,22 +638,22 @@ class ChartGenerator:
         prz_range_text = ""
         if pattern.d_point_range_min > 0 and pattern.d_point_range_max > 0:
             range_pct = ((pattern.d_point_range_max - pattern.entry_price) / pattern.entry_price) * 100
-            prz_range_text = f"Entry Zone: ${pattern.d_point_range_min:.2f} - ${pattern.d_point_range_max:.2f} (±{range_pct:.1f}%)\n"
+            prz_range_text = f"Entry Zone: \\${pattern.d_point_range_min:.2f} - \\${pattern.d_point_range_max:.2f} (+/-{range_pct:.1f}%)\n"
 
-        # Build info text
+        # Build info text (escape $ to prevent matplotlib LaTeX parsing)
         info_text = (
             f"TRADING LEVELS\n"
             f"{'─' * 20}\n"
-            f"Entry: ${pattern.entry_price:.2f}\n"
+            f"Entry: \\${pattern.entry_price:.2f}\n"
             f"{prz_range_text}"
-            f"Stop:  ${pattern.stop_loss:.2f}\n"
+            f"Stop:  \\${pattern.stop_loss:.2f}\n"
             f"Risk:  {risk_pct:.1f}%\n"
             f"\n"
             f"PROFIT TARGETS\n"
             f"{'─' * 20}\n"
-            f"T1: ${pattern.ipo_target_1:.2f}\n"
-            f"T2: ${pattern.ipo_target_2:.2f}\n"
-            f"T3: ${pattern.target_point_a:.2f}{tp_strategy_display}\n"
+            f"T1: \\${pattern.ipo_target_1:.2f}\n"
+            f"T2: \\${pattern.ipo_target_2:.2f}\n"
+            f"T3: \\${pattern.target_point_a:.2f}{tp_strategy_display}\n"
             f"\n"
             f"PATTERN METRICS\n"
             f"{'─' * 20}\n"
@@ -692,13 +692,13 @@ class ChartGenerator:
         if reaction_data.type1_detected:
             info += "Type 1: YES\n"
             if reaction_data.type1_max_move:
-                info += f"  Price: ${reaction_data.type1_max_move:.2f}\n"
+                info += f"  Price: \\${reaction_data.type1_max_move:.2f}\n"
             if reaction_data.target_382:
                 status_382 = "✓" if reaction_data.type1_reached_382 else "○"
-                info += f"  38.2% ({status_382}): ${reaction_data.target_382:.2f}\n"
+                info += f"  38.2% ({status_382}): \\${reaction_data.target_382:.2f}\n"
             if reaction_data.target_618:
                 status_618 = "✓" if reaction_data.type1_reached_618 else "○"
-                info += f"  61.8% ({status_618}): ${reaction_data.target_618:.2f}\n"
+                info += f"  61.8% ({status_618}): \\${reaction_data.target_618:.2f}\n"
             if reaction_data.type1_trendline_broken:
                 info += "  Trendline: BROKEN\n"
         else:
@@ -708,7 +708,7 @@ class ChartGenerator:
         if reaction_data.type2_detected:
             info += "Type 2: YES\n  PRZ Retested\n"
             if hasattr(reaction_data, 'type2_retest_price') and reaction_data.type2_retest_price:
-                info += f"  Price: ${reaction_data.type2_retest_price:.2f}\n"
+                info += f"  Price: \\${reaction_data.type2_retest_price:.2f}\n"
         elif reaction_data.type1_trendline_broken:
             info += "Type 2: WATCHING\n"
 
