@@ -74,6 +74,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Cache yfinance data
+        uses: actions/cache@v4
+        with:
+          path: .cache/yfinance_data
+          key: yfinance-data-${{ hashFiles('src/config/config.py') }}-${{ github.run_number }}
+          restore-keys: |
+            yfinance-data-${{ hashFiles('src/config/config.py') }}-
+            yfinance-data-
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -158,6 +167,23 @@ jobs:
           echo "✅ ALL SCANS COMPLETE"
           echo "========================================================================="
 
+      - name: Display cache statistics
+        if: always()
+        run: |
+          echo ""
+          echo "========================================================================="
+          echo "📊 CACHE STATISTICS"
+          echo "========================================================================="
+          python -c "
+          from src.data_cache import get_cache
+          cache = get_cache()
+          stats = cache.get_stats()
+          print(f\"Cache location: {stats['location']}\")
+          print(f\"Total files: {stats['total_files']} (fresh: {stats['fresh_files']}, expired: {stats['expired_files']})\")
+          print(f\"Total size: {stats['total_size_mb']} MB\")
+          print(f\"TTL: {stats['ttl_hours']} hours\")
+          " || echo "Failed to get cache stats"
+
       - name: Send Discord notifications for all timeframes
         if: always()
         env:
@@ -200,16 +226,55 @@ jobs:
             DESCRIPTION=$'**Timeframe:** '"$TIMEFRAME"$'\n**Strategy:** '"$TP_STRATEGY"$'\n**Total Scanned:** '"$TOTAL"$'\n\n🟢 **BUY Signals:** '"$BUY"$'\n🔴 **SELL Signals:** '"$SELL"
 
 
-            # Run Python script to parse signals and create Discord payload
+            # Send summary embed first
             REPORT_FILE="$REPORT_FILE" TITLE="$TITLE" DESCRIPTION="$DESCRIPTION" COLOR="$COLOR" TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" \
               python3 .github/scripts/parse_discord_signals.py > "discord_payload_$TIMEFRAME.json"
 
-            # Send Discord notification
             curl -H "Content-Type: application/json" \
                  -d @"discord_payload_$TIMEFRAME.json" \
                  $DISCORD_WEBHOOK
 
-            echo "✅ Discord notification sent for $TIMEFRAME"
+            echo "✅ Summary notification sent for $TIMEFRAME"
+
+            # Send chart images for each signal
+            CHARTS_DIR="reports/$REPORT_DATE/charts"
+            if [ -d "$CHARTS_DIR" ]; then
+              echo "📊 Sending chart images for $TIMEFRAME signals..."
+
+              # Find all chart files for this timeframe's signals
+              # Chart filenames include ticker name, so we can extract it
+              for CHART in "$CHARTS_DIR"/*.png; do
+                if [ -f "$CHART" ]; then
+                  # Extract ticker from filename (assuming format: TICKER_pattern_date.png)
+                  FILENAME=$(basename "$CHART")
+                  TICKER=$(echo "$FILENAME" | cut -d'_' -f1)
+
+                  # Determine if BUY or SELL by checking report
+                  if grep -q "Ticker:\s\+$TICKER" "$REPORT_FILE" 2>/dev/null; then
+                    # Check which section it's in
+                    if sed -n '/^BUY SIGNALS/,/^SELL SIGNALS/p' "$REPORT_FILE" | grep -q "Ticker:\s\+$TICKER" 2>/dev/null; then
+                      SIGNAL_TYPE="🟢 BUY"
+                    elif sed -n '/^SELL SIGNALS/,/^MONITORING/p' "$REPORT_FILE" | grep -q "Ticker:\s\+$TICKER" 2>/dev/null; then
+                      SIGNAL_TYPE="🔴 SELL"
+                    else
+                      SIGNAL_TYPE="📊"
+                    fi
+
+                    # Send chart with ticker label
+                    curl -F "file=@$CHART" \
+                         -F "payload_json={\"content\":\"$SIGNAL_TYPE - **$TICKER** ($TIMEFRAME)\"}" \
+                         $DISCORD_WEBHOOK
+
+                    # Small delay to avoid rate limits (Discord allows ~5 messages per second)
+                    sleep 0.3
+                  fi
+                fi
+              done
+
+              echo "✅ Chart images sent for $TIMEFRAME"
+            else
+              echo "⚠️ No charts directory found for $TIMEFRAME"
+            fi
           done
 
       - name: Upload all reports
@@ -232,6 +297,16 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Cache yfinance data
+        uses: actions/cache@v4
+        with:
+          path: .cache/yfinance_data
+          key: yfinance-data-crypto-${{ hashFiles('src/config/config.py') }}-${{ github.run_number }}
+          restore-keys: |
+            yfinance-data-crypto-${{ hashFiles('src/config/config.py') }}-
+            yfinance-data-crypto-
+            yfinance-data-
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -310,16 +385,54 @@ jobs:
             DESCRIPTION=$'**Timeframe:** '"$TIMEFRAME"$'\n**Total Scanned:** '"$TOTAL"$' cryptocurrencies\n\n🟢 **BUY Signals:** '"$BUY"$'\n🔴 **SELL Signals:** '"$SELL"
 
 
-            # Run Python script to parse crypto signals and create Discord payload
+            # Send summary embed first
             REPORT_FILE="$REPORT_FILE" TITLE="$TITLE" DESCRIPTION="$DESCRIPTION" COLOR="$COLOR" TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" \
               python3 .github/scripts/parse_discord_signals.py > "discord_crypto_payload_$TIMEFRAME.json"
 
-            # Send Discord notification
             curl -H "Content-Type: application/json" \
                  -d @"discord_crypto_payload_$TIMEFRAME.json" \
                  $DISCORD_WEBHOOK
 
-            echo "✅ Discord notification sent for crypto $TIMEFRAME"
+            echo "✅ Summary notification sent for crypto $TIMEFRAME"
+
+            # Send chart images for each signal
+            CHARTS_DIR="crypto_reports/$REPORT_DATE/charts"
+            if [ -d "$CHARTS_DIR" ]; then
+              echo "📊 Sending chart images for crypto $TIMEFRAME signals..."
+
+              # Find all chart files for this timeframe's signals
+              for CHART in "$CHARTS_DIR"/*.png; do
+                if [ -f "$CHART" ]; then
+                  # Extract ticker from filename
+                  FILENAME=$(basename "$CHART")
+                  TICKER=$(echo "$FILENAME" | cut -d'_' -f1)
+
+                  # Determine if BUY or SELL by checking report
+                  if grep -q "Ticker:\s\+$TICKER" "$REPORT_FILE" 2>/dev/null; then
+                    # Check which section it's in
+                    if sed -n '/^BUY SIGNALS/,/^SELL SIGNALS/p' "$REPORT_FILE" | grep -q "Ticker:\s\+$TICKER" 2>/dev/null; then
+                      SIGNAL_TYPE="🟢 BUY"
+                    elif sed -n '/^SELL SIGNALS/,/^MONITORING/p' "$REPORT_FILE" | grep -q "Ticker:\s\+$TICKER" 2>/dev/null; then
+                      SIGNAL_TYPE="🔴 SELL"
+                    else
+                      SIGNAL_TYPE="📊"
+                    fi
+
+                    # Send chart with ticker label
+                    curl -F "file=@$CHART" \
+                         -F "payload_json={\"content\":\"$SIGNAL_TYPE - **$TICKER** 🪙 ($TIMEFRAME)\"}" \
+                         $DISCORD_WEBHOOK
+
+                    # Small delay to avoid rate limits
+                    sleep 0.3
+                  fi
+                fi
+              done
+
+              echo "✅ Chart images sent for crypto $TIMEFRAME"
+            else
+              echo "⚠️ No charts directory found for crypto $TIMEFRAME"
+            fi
           done
 
       - name: Upload crypto reports
