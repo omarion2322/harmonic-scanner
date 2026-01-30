@@ -74,6 +74,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Cache yfinance data
+        uses: actions/cache@v4
+        with:
+          path: .cache/yfinance_data
+          key: yfinance-data-${{ hashFiles('src/config/config.py') }}-${{ github.run_number }}
+          restore-keys: |
+            yfinance-data-${{ hashFiles('src/config/config.py') }}-
+            yfinance-data-
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -157,6 +166,23 @@ jobs:
           echo "========================================================================="
           echo "✅ ALL SCANS COMPLETE"
           echo "========================================================================="
+
+      - name: Display cache statistics
+        if: always()
+        run: |
+          echo ""
+          echo "========================================================================="
+          echo "📊 CACHE STATISTICS"
+          echo "========================================================================="
+          python -c "
+          from src.data_cache import get_cache
+          cache = get_cache()
+          stats = cache.get_stats()
+          print(f\"Cache location: {stats['location']}\")
+          print(f\"Total files: {stats['total_files']} (fresh: {stats['fresh_files']}, expired: {stats['expired_files']})\")
+          print(f\"Total size: {stats['total_size_mb']} MB\")
+          print(f\"TTL: {stats['ttl_hours']} hours\")
+          " || echo "Failed to get cache stats"
 
       - name: Send Discord notifications for all timeframes
         if: always()
@@ -271,6 +297,16 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Cache yfinance data
+        uses: actions/cache@v4
+        with:
+          path: .cache/yfinance_data
+          key: yfinance-data-crypto-${{ hashFiles('src/config/config.py') }}-${{ github.run_number }}
+          restore-keys: |
+            yfinance-data-crypto-${{ hashFiles('src/config/config.py') }}-
+            yfinance-data-crypto-
+            yfinance-data-
 
       - name: Set up Python
         uses: actions/setup-python@v5

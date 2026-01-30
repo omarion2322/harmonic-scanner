@@ -5,6 +5,7 @@ Provides robust data downloading from yfinance with:
 - Exponential backoff retry mechanism
 - Rate limiting protection
 - Error handling for common failures
+- File-based caching to avoid duplicate downloads
 """
 
 import yfinance as yf
@@ -12,8 +13,12 @@ import pandas as pd
 import time
 from typing import Optional
 from logging_config import get_logger
+from data_cache import get_cache
 
 logger = get_logger(__name__)
+
+# Get global cache instance
+_cache = get_cache()
 
 
 def download_stock_data(
@@ -23,7 +28,8 @@ def download_stock_data(
     auto_adjust: bool = False,
     max_retries: int = 3,
     initial_delay: float = 1.0,
-    backoff_factor: float = 2.0
+    backoff_factor: float = 2.0,
+    use_cache: bool = True
 ) -> pd.DataFrame:
     """
     Download stock data with retry logic and exponential backoff.
@@ -36,6 +42,7 @@ def download_stock_data(
         max_retries: Maximum number of retry attempts
         initial_delay: Initial delay before first retry (seconds)
         backoff_factor: Multiplier for exponential backoff
+        use_cache: Whether to use file-based cache (default: True)
 
     Returns:
         DataFrame with OHLCV data, or empty DataFrame on failure
@@ -45,6 +52,11 @@ def download_stock_data(
         - Attempt 2: Wait 1.0s (initial_delay)
         - Attempt 3: Wait 2.0s (initial_delay * backoff_factor)
         - Attempt 4: Wait 4.0s (initial_delay * backoff_factor^2)
+
+    Caching:
+        - Checks cache before downloading (8-hour TTL)
+        - Saves successful downloads to cache
+        - Avoids duplicate API calls within same session
 
     Logging:
         - Shows message on first failure
@@ -56,6 +68,12 @@ def download_stock_data(
         >>> if not df.empty:
         ...     print(f"Downloaded {len(df)} bars")
     """
+
+    # Check cache first
+    if use_cache:
+        cached_data = _cache.get(ticker, period, interval)
+        if cached_data is not None:
+            return cached_data
 
     last_error = None
     delay = initial_delay
@@ -78,6 +96,11 @@ def download_stock_data(
                 if attempt > 0:
                     # Retry succeeded - log it
                     logger.info("%s: Retry succeeded (attempt %d)", ticker, attempt + 1)
+
+                # Cache the successful download
+                if use_cache:
+                    _cache.set(ticker, period, interval, df)
+
                 return df
             else:
                 # Empty DataFrame - stock might not exist or have no data
@@ -120,6 +143,11 @@ def download_stock_data(
                         if not df.empty:
                             if first_failure_logged:
                                 logger.info("%s: Dividend error bypassed using period=%s", ticker, fallback_period)
+
+                            # Cache the successful fallback download
+                            if use_cache:
+                                _cache.set(ticker, fallback_period, interval, df)
+
                             return df
                     except Exception:
                         continue  # Try next fallback period
@@ -164,7 +192,8 @@ def download_with_rate_limit(
     interval: str = '1d',
     auto_adjust: bool = False,
     rate_limit_delay: float = 0.1,
-    max_retries: int = 3
+    max_retries: int = 3,
+    use_cache: bool = True
 ) -> pd.DataFrame:
     """
     Download stock data with built-in rate limiting and retry logic.
@@ -179,6 +208,7 @@ def download_with_rate_limit(
         auto_adjust: Whether to auto-adjust prices for dividends
         rate_limit_delay: Delay between downloads (seconds)
         max_retries: Maximum number of retry attempts
+        use_cache: Whether to use file-based cache (default: True)
 
     Returns:
         DataFrame with OHLCV data, or empty DataFrame on failure
@@ -188,13 +218,14 @@ def download_with_rate_limit(
         >>> df = download_with_rate_limit('AAPL', period='1y', rate_limit_delay=0.2)
     """
 
-    # Download with retries
+    # Download with retries (and caching)
     df = download_stock_data(
         ticker=ticker,
         period=period,
         interval=interval,
         auto_adjust=auto_adjust,
-        max_retries=max_retries
+        max_retries=max_retries,
+        use_cache=use_cache
     )
 
     # Apply rate limiting delay

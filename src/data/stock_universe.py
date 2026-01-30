@@ -8,6 +8,13 @@ import pandas as pd
 import requests
 from typing import List
 import time
+import sys
+import os
+
+# Add parent directory to path to import modules
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config.config import DATA_PERIOD
+from data_downloader import download_stock_data
 
 
 def get_sp500_tickers() -> List[str]:
@@ -215,18 +222,36 @@ def filter_by_volume(tickers: List[str], min_volume_usd: float = 1_000_000,
             if i % 50 == 0:
                 print(f"  Progress: {i}/{len(tickers)} tickers processed, {len(filtered_tickers)} qualify...")
 
-            # Fetch recent data (fetch extra day to exclude today)
-            stock = yf.Ticker(ticker)
-            hist = stock.history(period=f"{lookback_days + 1}d")
+            # OPTIMIZATION: Download full historical data ONCE using the scanning interval
+            # Works for all timeframes (1d, 1wk, 1mo):
+            # - Downloads DATA_PERIOD at scanning interval (1d/1wk/1mo)
+            # - Use full period to verify sufficient history exists
+            # - Slice recent bars for volume calculation
+            # - Pattern detection downloads same period+interval → CACHE HIT for ALL timeframes!
+            hist_full = download_stock_data(
+                ticker=ticker,
+                period=DATA_PERIOD,
+                interval=interval,
+                use_cache=True
+            )
 
-            if hist.empty or len(hist) < 3:  # Need at least 3 days of data
+            # Check if we have sufficient history (if we can download DATA_PERIOD, it's enough)
+            if hist_full.empty or len(hist_full) < min_bars:
+                insufficient_bars_count += 1
+                continue
+
+            # Need at least enough data for volume calculation
+            if len(hist_full) < lookback_days + 1:
                 failed_count += 1
                 continue
 
-            # Exclude today (last row) and use the previous lookback_days
-            hist_filtered = hist.iloc[:-1].tail(lookback_days)
+            # Slice recent bars for volume check (exclude current/incomplete bar, use previous lookback_days bars)
+            # For daily: exclude today, use last 4 days
+            # For weekly: exclude current week, use last 20 weeks
+            # For monthly: exclude current month, use last 90 months
+            hist_filtered = hist_full.iloc[:-1].tail(lookback_days)
 
-            # Calculate average based on filter mode
+            # Calculate average volume based on filter mode
             if filter_by_stock_volume:
                 # Share volume mode
                 avg_volume = hist_filtered['Volume'].mean()
@@ -241,18 +266,6 @@ def filter_by_volume(tickers: List[str], min_volume_usd: float = 1_000_000,
             # Check if meets volume criteria
             if not meets_criteria:
                 continue  # Skip to next ticker
-
-            # Additional check: minimum bar count for the trading interval
-            # Download data with the actual trading interval to check bar count
-            try:
-                hist_interval = stock.history(period='5y', interval=interval, raise_errors=False)
-                if hist_interval.empty or len(hist_interval) < min_bars:
-                    insufficient_bars_count += 1
-                    continue  # Skip tickers with insufficient history
-            except:
-                # If we can't check bar count, err on the side of caution and skip
-                insufficient_bars_count += 1
-                continue
 
             # Ticker meets both volume and bar count criteria
             filtered_tickers.append(ticker)
