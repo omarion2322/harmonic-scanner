@@ -332,7 +332,9 @@ def get_stock_universe(stocks_to_scan: str = 'SP500',
     # Add stocks based on configuration
     if stocks_to_scan and stocks_to_scan.upper() != 'NONE':
         if stocks_to_scan.upper() == 'ALL':
-            if filter_by_stock_volume:
+            if filter_by_stock_volume is None:
+                print(f"Selected: ALL - All Nasdaq stocks (no volume filter)")
+            elif filter_by_stock_volume:
                 print(f"Selected: ALL - All Nasdaq stocks (filtered by volume > {min_volume_stocks:,} shares)")
             else:
                 print(f"Selected: ALL - All Nasdaq stocks (filtered by volume > ${min_volume_usd:,} USD)")
@@ -347,25 +349,30 @@ def get_stock_universe(stocks_to_scan: str = 'SP500',
             # Apply historical volume validation to ensure stocks consistently meet volume requirements
             # This filters out stocks that may have passed the quick screener but don't have sustained volume
             # Lookback period matches the scanning timeframe: 1d=1 day, 3d=3 days, 1wk=5 days, 1mo=23 days
-            timeframe_lookback = {
-                '1d': 4,   # 1 trading day, multiplied by 4
-                '3d': 12,   # 3 trading days, multiplied by 4
-                '1wk': 20,  # 1 week = 5 trading days, multiplied by 4
-                '1mo': 90  # 1 month ≈ 23 trading days, multipled by 4
-            }
-            lookback = timeframe_lookback.get(timeframe, 7)  # Default to 7 if unknown timeframe
+            # Skip if filter_by_stock_volume is None
+            if filter_by_stock_volume is not None:
+                timeframe_lookback = {
+                    '1d': 4,   # 1 trading day, multiplied by 4
+                    '3d': 12,   # 3 trading days, multiplied by 4
+                    '1wk': 20,  # 1 week = 5 trading days, multiplied by 4
+                    '1mo': 90  # 1 month ≈ 23 trading days, multipled by 4
+                }
+                lookback = timeframe_lookback.get(timeframe, 7)  # Default to 7 if unknown timeframe
 
-            print(f"\nApplying historical volume validation (this may take a few minutes)...")
-            nasdaq_tickers = filter_by_volume(
-                nasdaq_tickers,
-                min_volume_usd=min_volume_usd,
-                min_volume_stocks=min_volume_stocks,
-                filter_by_stock_volume=filter_by_stock_volume,
-                lookback_days=lookback,
-                delay=download_delay,
-                min_bars=min_bars,
-                interval=timeframe
-            )
+                print(f"\nApplying historical volume validation (this may take a few minutes)...")
+                nasdaq_tickers = filter_by_volume(
+                    nasdaq_tickers,
+                    min_volume_usd=min_volume_usd,
+                    min_volume_stocks=min_volume_stocks,
+                    filter_by_stock_volume=filter_by_stock_volume,
+                    lookback_days=lookback,
+                    delay=download_delay,
+                    min_bars=min_bars,
+                    interval=timeframe
+                )
+            else:
+                print(f"\n⚠ Volume filtering disabled (FILTER_BY_STOCK_VOLUME = None)")
+                print(f"  Skipping historical volume validation - using all {len(nasdaq_tickers)} tickers from screener")
 
             all_tickers.extend(nasdaq_tickers)
             scan_types.append('Nasdaq (All)')

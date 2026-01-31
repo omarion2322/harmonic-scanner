@@ -112,7 +112,8 @@ CRYPTOS_TO_SCAN = 'Top500'  # Options: 'Top100', 'Top50', 'Top20', or None
 # Volume filtering mode (applies to 'All' Nasdaq mode only)
 # If True: Filter by share volume (MIN_VOLUME_STOCKS)
 # If False: Filter by dollar volume (MIN_VOLUME_USD)
-FILTER_BY_STOCK_VOLUME = False
+# If None: Skip volume filtering entirely (faster but may include low-liquidity stocks)
+FILTER_BY_STOCK_VOLUME = None
 
 # Minimum average daily DOLLAR volume (used when FILTER_BY_STOCK_VOLUME = False)
 # Filters stocks to ensure liquidity for harmonic pattern trading
@@ -369,7 +370,9 @@ def get_settings_summary():
     # Stock Universe
     if STOCKS_TO_SCAN and STOCKS_TO_SCAN.upper() != 'NONE':
         if STOCKS_TO_SCAN.upper() == 'ALL':
-            if FILTER_BY_STOCK_VOLUME:
+            if FILTER_BY_STOCK_VOLUME is None:
+                stock_desc = f"All Nasdaq stocks (no volume filter)"
+            elif FILTER_BY_STOCK_VOLUME:
                 stock_desc = f"All Nasdaq stocks (volume > {MIN_VOLUME_STOCKS:,} shares)"
             else:
                 stock_desc = f"All Nasdaq stocks (volume > ${MIN_VOLUME_USD:,} USD)"
@@ -400,7 +403,9 @@ def get_settings_summary():
         print(f"  Crypto Universe: Disabled")
 
     if STOCKS_TO_SCAN and STOCKS_TO_SCAN.upper() == 'ALL':
-        if FILTER_BY_STOCK_VOLUME:
+        if FILTER_BY_STOCK_VOLUME is None:
+            print(f"  Min Volume Filter: DISABLED (using screener results without validation)")
+        elif FILTER_BY_STOCK_VOLUME:
             print(f"  Min Volume Filter: {MIN_VOLUME_STOCKS:,} shares avg daily (SHARE volume mode)")
         else:
             print(f"  Min Volume Filter: ${MIN_VOLUME_USD:,} USD avg daily (DOLLAR volume mode)")
