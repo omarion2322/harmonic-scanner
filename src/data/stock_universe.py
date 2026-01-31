@@ -15,6 +15,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config.config import DATA_PERIOD
 from data_downloader import download_stock_data
+from data_cache import get_cache
 
 
 def get_sp500_tickers() -> List[str]:
@@ -216,11 +217,17 @@ def filter_by_volume(tickers: List[str], min_volume_usd: float = 1_000_000,
     failed_count = 0
     insufficient_bars_count = 0
 
+    # Get cache instance for checking
+    cache = get_cache()
+
     for i, ticker in enumerate(tickers, 1):
         try:
             # Progress indicator
             if i % 50 == 0:
-                print(f"  Progress: {i}/{len(tickers)} tickers processed, {len(filtered_tickers)} qualify...")
+                print(f"  Progress: {i}/{len(tickers)} tickers processed, {len(filtered_tickers)} qualify")
+
+            # Check if data is in cache BEFORE downloading
+            was_cached = cache.get(ticker, DATA_PERIOD, interval) is not None
 
             # OPTIMIZATION: Download full historical data ONCE using the scanning interval
             # Works for all timeframes (1d, 1wk, 1mo):
@@ -270,8 +277,10 @@ def filter_by_volume(tickers: List[str], min_volume_usd: float = 1_000_000,
             # Ticker meets both volume and bar count criteria
             filtered_tickers.append(ticker)
 
-            # Rate limiting
-            time.sleep(delay)
+            # OPTIMIZATION: Only add rate limiting delay for actual API calls (cache misses)
+            # Cache hits are instant, no need to delay
+            if not was_cached and delay > 0:
+                time.sleep(delay)
 
         except Exception as e:
             failed_count += 1

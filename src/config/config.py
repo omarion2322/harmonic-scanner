@@ -113,7 +113,7 @@ CRYPTOS_TO_SCAN = 'Top500'  # Options: 'Top100', 'Top50', 'Top20', or None
 # If True: Filter by share volume (MIN_VOLUME_STOCKS)
 # If False: Filter by dollar volume (MIN_VOLUME_USD)
 # If None: Skip volume filtering entirely (faster but may include low-liquidity stocks)
-FILTER_BY_STOCK_VOLUME = None
+FILTER_BY_STOCK_VOLUME = False
 
 # Minimum average daily DOLLAR volume (used when FILTER_BY_STOCK_VOLUME = False)
 # Filters stocks to ensure liquidity for harmonic pattern trading
@@ -134,7 +134,7 @@ MAX_STOCKS_TO_SCAN = 10000
 # With parallel workers: total_rate = workers / delay
 # Formula: delay = workers / 60 requests_per_min = workers / 1 request_per_sec
 # Example: 10 workers with 10s delay = 60 requests/min (at the limit)
-DOWNLOAD_DELAY = 0.1
+DOWNLOAD_DELAY = 0.02
 
 # Maximum number of retry attempts for failed downloads
 # Uses exponential backoff: 1s, 2s, 4s delays between retries
