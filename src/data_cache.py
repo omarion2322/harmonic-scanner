@@ -15,7 +15,11 @@ Cache Features:
 import pandas as pd
 from pathlib import Path
 from datetime import datetime
-from logging_config import get_logger
+
+try:
+    from logging_config import get_logger
+except ModuleNotFoundError:
+    from src.logging_config import get_logger
 
 logger = get_logger(__name__)
 

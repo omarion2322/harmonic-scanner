@@ -461,8 +461,7 @@ jobs:
           curl -H "Content-Type: application/json" \
                -d "{
                  \"embeds\": [{
-                   \"title\": \"✅ All Sequential Scans Complete\",
-                   \"description\": \"**Mode:** Sequential (rate-limit compliant)\\n**Timeframes:** ${{ needs.setup.outputs.timeframes }}\\n**Strategy:** ${{ needs.setup.outputs.tp_strategy }}\\n\\nStock Scans: ${{ needs.stock-scans.result }}\\nCrypto Scans: ${{ needs.crypto-scan.result }}\",
+                   \"title\": \"✅ All Scans Complete\",
                    \"color\": 3066993,
                    \"footer\": {\"text\": \"View detailed results in artifacts\"},
                    \"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\"
