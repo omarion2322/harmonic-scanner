@@ -74,19 +74,19 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Cache yfinance data
+      - name: Cache stock data
         uses: actions/cache@v4
         with:
-          path: .cache/yfinance_data
-          key: yfinance-data-${{ hashFiles('src/config/config.py') }}-${{ github.run_number }}
+          path: .cache/stock_data
+          key: stock-data-${{ hashFiles('src/config/config.py') }}-${{ github.run_number }}
           restore-keys: |
-            yfinance-data-${{ hashFiles('src/config/config.py') }}-
-            yfinance-data-
+            stock-data-${{ hashFiles('src/config/config.py') }}-
+            stock-data-
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.9'
+          python-version: '3.13'
           cache: 'pip'
 
       - name: Install dependencies
@@ -298,20 +298,20 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Cache yfinance data
+      - name: Cache stock data
         uses: actions/cache@v4
         with:
-          path: .cache/yfinance_data
-          key: yfinance-data-crypto-${{ hashFiles('src/config/config.py') }}-${{ github.run_number }}
+          path: .cache/stock_data
+          key: stock-data-crypto-${{ hashFiles('src/config/config.py') }}-${{ github.run_number }}
           restore-keys: |
-            yfinance-data-crypto-${{ hashFiles('src/config/config.py') }}-
-            yfinance-data-crypto-
-            yfinance-data-
+            stock-data-crypto-${{ hashFiles('src/config/config.py') }}-
+            stock-data-crypto-
+            stock-data-
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.9'
+          python-version: '3.13'
           cache: 'pip'
 
       - name: Install dependencies
