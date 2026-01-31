@@ -97,7 +97,7 @@ STOCKS_TO_SCAN = 'All'
 
 # Add additional stock tickers to scan (beyond S&P 500)
 # Example: ['TSLA', 'NVDA']
-STOCK_TICKERS = ['AVGO','LAES','ONDS', 'RIVN', 'TIC', 'IQ', 'PANW', 'DOCU', 'LAC', 'URA', 'FRSH', 'EVEX', 'SSYS','BULL','TGT','CROX', 'CLSK', 'TEAM','REMX','SNDK','RGTI']
+STOCK_TICKERS = ['SSNC','HUT','AVGO','LAES','ONDS', 'RIVN', 'TIC', 'IQ', 'PANW', 'DOCU', 'LAC', 'URA', 'FRSH', 'EVEX', 'SSYS','BULL','TGT','CROX', 'CLSK', 'TEAM','REMX','SNDK','RGTI']
 
 # ETF universe to scan
 # Set to True to include all leading ETFs (135 total), False to skip ETFs
