@@ -1,7 +1,7 @@
 """
-Data Cache Module
+Data Cache Module.
 
-Provides file-based caching for yfinance data downloads to avoid duplicate API calls.
+Provides file-based caching for stock data downloads to avoid duplicate API calls.
 Works in both local and GitHub Actions environments.
 
 Cache Features:
@@ -12,9 +12,11 @@ Cache Features:
 - Works across multiple processes
 """
 
-import pandas as pd
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+import pandas as pd
 
 try:
     from logging_config import get_logger
@@ -25,14 +27,14 @@ logger = get_logger(__name__)
 
 
 class DataCache:
-    """File-based cache for yfinance data downloads."""
+    """File-based cache for stock data downloads (defeatbeta-api compatible)."""
 
-    def __init__(self, cache_dir='.cache/yfinance_data', ttl_hours=8):
+    def __init__(self, cache_dir: str = '.cache/stock_data', ttl_hours: int = 8) -> None:
         """
         Initialize data cache.
 
         Args:
-            cache_dir: Directory for cache files (default: .cache/yfinance_data)
+            cache_dir: Directory for cache files (default: .cache/stock_data)
             ttl_hours: Time-to-live in hours (default: 8 hours)
         """
         self.cache_dir = Path(cache_dir)
@@ -40,33 +42,50 @@ class DataCache:
         self.ttl_hours = ttl_hours
         self._cleanup_on_init()
 
-    def _cleanup_on_init(self):
+    def _cleanup_on_init(self) -> None:
         """Clean up expired cache files on initialization."""
         try:
             self.clear_expired()
         except Exception as e:
             logger.warning("Failed to cleanup cache on init: %s", e)
 
-    def _get_cache_key(self, ticker, period, interval):
+    def _get_cache_key(self, ticker: str, period: str, interval: str) -> str:
         """
         Generate cache filename.
 
         Format: TICKER_INTERVAL_PERIOD_TIMESTAMP.parquet
         Example: AAPL_1d_1y_20260130_140532.parquet
+
+        Args:
+            ticker: Stock ticker symbol
+            period: Data period (e.g., '1y', '5y')
+            interval: Data interval (e.g., '1d', '1wk')
+
+        Returns:
+            Cache filename with timestamp
         """
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         # Use timestamp in filename for easy age checking
         return f"{ticker}_{interval}_{period}_{timestamp}.parquet"
 
-    def _find_cache_file(self, ticker, period, interval):
+    def _find_cache_file(self, ticker: str, period: str, interval: str) -> Optional[Path]:
         """
         Find the most recent cache file for given parameters.
+
+        Args:
+            ticker: Stock ticker symbol
+            period: Data period (e.g., '1y', '5y')
+            interval: Data interval (e.g., '1d', '1wk')
 
         Returns:
             Path to cache file if found and fresh, None otherwise
         """
         pattern = f"{ticker}_{interval}_{period}_*.parquet"
-        cache_files = sorted(self.cache_dir.glob(pattern), key=lambda f: f.stat().st_mtime, reverse=True)
+        cache_files = sorted(
+            self.cache_dir.glob(pattern),
+            key=lambda f: f.stat().st_mtime,
+            reverse=True
+        )
 
         if not cache_files:
             return None
@@ -82,7 +101,7 @@ class DataCache:
 
         return None
 
-    def get(self, ticker, period, interval):
+    def get(self, ticker: str, period: str, interval: str) -> Optional[pd.DataFrame]:
         """
         Get cached data if available and fresh.
 
@@ -101,7 +120,9 @@ class DataCache:
                 df = pd.read_parquet(cache_file)
 
                 if not df.empty:
-                    file_age_minutes = (datetime.now().timestamp() - cache_file.stat().st_mtime) / 60
+                    file_age_minutes = (
+                        datetime.now().timestamp() - cache_file.stat().st_mtime
+                    ) / 60
                     logger.debug("%s: Cache hit (age: %.1f min)", ticker, file_age_minutes)
                     return df
 
@@ -111,12 +132,12 @@ class DataCache:
             try:
                 if cache_file and cache_file.exists():
                     cache_file.unlink()
-            except:
+            except Exception:
                 pass
 
         return None
 
-    def set(self, ticker, period, interval, data: pd.DataFrame):
+    def set(self, ticker: str, period: str, interval: str, data: pd.DataFrame) -> None:
         """
         Save data to cache.
 
@@ -140,11 +161,22 @@ class DataCache:
         except Exception as e:
             logger.warning("%s: Failed to cache data: %s", ticker, e)
 
-    def _cleanup_old_versions(self, ticker, period, interval):
-        """Remove old cache files for the same ticker/period/interval."""
+    def _cleanup_old_versions(self, ticker: str, period: str, interval: str) -> None:
+        """
+        Remove old cache files for the same ticker/period/interval.
+
+        Args:
+            ticker: Stock ticker symbol
+            period: Data period
+            interval: Data interval
+        """
         try:
             pattern = f"{ticker}_{interval}_{period}_*.parquet"
-            cache_files = sorted(self.cache_dir.glob(pattern), key=lambda f: f.stat().st_mtime, reverse=True)
+            cache_files = sorted(
+                self.cache_dir.glob(pattern),
+                key=lambda f: f.stat().st_mtime,
+                reverse=True
+            )
 
             # Keep only the most recent file, delete the rest
             for old_file in cache_files[1:]:
@@ -153,7 +185,7 @@ class DataCache:
         except Exception as e:
             logger.debug("Failed to cleanup old versions: %s", e)
 
-    def clear_expired(self):
+    def clear_expired(self) -> None:
         """Remove expired cache files."""
         try:
             cutoff_time = datetime.now().timestamp() - (self.ttl_hours * 3600)
@@ -170,7 +202,7 @@ class DataCache:
         except Exception as e:
             logger.warning("Failed to clear expired cache: %s", e)
 
-    def clear_all(self):
+    def clear_all(self) -> None:
         """Remove all cache files."""
         try:
             deleted_count = 0
@@ -183,7 +215,7 @@ class DataCache:
         except Exception as e:
             logger.warning("Failed to clear cache: %s", e)
 
-    def get_stats(self):
+    def get_stats(self) -> dict:
         """
         Get cache statistics.
 
@@ -220,11 +252,16 @@ class DataCache:
 
 
 # Global cache instance (8-hour TTL)
-_global_cache = DataCache(cache_dir='.cache/yfinance_data', ttl_hours=8)
+_global_cache = DataCache(cache_dir='.cache/stock_data', ttl_hours=8)
 
 
-def get_cache():
-    """Get the global cache instance."""
+def get_cache() -> DataCache:
+    """
+    Get the global cache instance.
+
+    Returns:
+        DataCache instance
+    """
     return _global_cache
 
 
@@ -240,14 +277,13 @@ if __name__ == "__main__":
     logger.info("Cache stats: %s", stats)
 
     # Test cache operations
-    import yfinance as yf
+    from data_downloader import download_stock_data
 
     logger.info("\nTest 1: Cache miss (should download)")
     data = cache.get('AAPL', '1mo', '1d')
     if data is None:
         logger.info("  Cache miss - downloading...")
-        stock = yf.Ticker('AAPL')
-        data = stock.history(period='1mo', interval='1d')
+        data = download_stock_data('AAPL', period='1mo', interval='1d', use_cache=False)
         cache.set('AAPL', '1mo', '1d', data)
         logger.info("  Downloaded and cached %d bars", len(data))
 
@@ -259,8 +295,10 @@ if __name__ == "__main__":
     # Final stats
     stats = cache.get_stats()
     logger.info("\nFinal cache stats:")
-    logger.info("  Files: %d (fresh: %d, expired: %d)",
-                stats['total_files'], stats['fresh_files'], stats['expired_files'])
+    logger.info(
+        "  Files: %d (fresh: %d, expired: %d)",
+        stats['total_files'], stats['fresh_files'], stats['expired_files']
+    )
     logger.info("  Size: %.2f MB", stats['total_size_mb'])
     logger.info("  Location: %s", stats['location'])
 

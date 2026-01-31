@@ -767,18 +767,14 @@ class TPScoringEngine:
 
 def test_tp_scoring():
     """Test the TP scoring engine with sample data."""
-    import yfinance as yf
+    from data_downloader import download_stock_data
 
     print("Testing TP Scoring Engine...")
     print("="*80)
 
     # Download sample data
     ticker = "AAPL"
-    df = yf.download(ticker, period="1y", interval="1d", progress=False)
-
-    # Handle MultiIndex columns from yfinance
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
+    df = download_stock_data(ticker, period="1y", interval="1d")
 
     # Ensure columns are lowercase
     df.columns = [col.lower() for col in df.columns]

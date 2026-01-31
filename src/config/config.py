@@ -134,12 +134,12 @@ MAX_STOCKS_TO_SCAN = 10000
 # With parallel workers: total_rate = workers / delay
 # Formula: delay = workers / 60 requests_per_min = workers / 1 request_per_sec
 # Example: 10 workers with 10s delay = 60 requests/min (at the limit)
-DOWNLOAD_DELAY = 0.02
+DOWNLOAD_DELAY = 0.00
 
 # Maximum number of retry attempts for failed downloads
 # Uses exponential backoff: 1s, 2s, 4s delays between retries
 # Recommended: 3 retries (handles temporary network issues and rate limits)
-MAX_DOWNLOAD_RETRIES = 3
+MAX_DOWNLOAD_RETRIES = 1
 
 # Parallel processing settings
 # Number of parallel workers for scanning tickers

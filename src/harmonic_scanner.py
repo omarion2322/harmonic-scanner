@@ -6,7 +6,6 @@ Usage:
     python harmonic_scanner.py
 """
 
-import yfinance as yf
 import pandas as pd
 from datetime import datetime
 import warnings
