@@ -18,7 +18,7 @@ Based on practical trading considerations:
 # ============================================================================
 DAILY_CONFIG = {
     'SWING_WINDOW': 4,
-    'MAX_DAYS_SINCE_PATTERN': 7,
+    'MAX_DAYS_SINCE_PATTERN': 3,
     'DATA_PERIOD': '4y',
     'MIN_ALLOWED_STOP_LOSS_PCT': 8.0,
     'MAX_ALLOWED_STOP_LOSS_PCT': 15.0,
@@ -48,7 +48,7 @@ THREE_DAY_CONFIG = {
 # ============================================================================
 WEEKLY_CONFIG = {
     'SWING_WINDOW': 4,
-    'MAX_DAYS_SINCE_PATTERN': 14,
+    'MAX_DAYS_SINCE_PATTERN': 7,
     'DATA_PERIOD': '5y',
     'MIN_ALLOWED_STOP_LOSS_PCT': 8.0,
     'MAX_ALLOWED_STOP_LOSS_PCT': 15.0,
