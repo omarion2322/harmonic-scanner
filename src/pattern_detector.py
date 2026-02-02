@@ -1430,7 +1430,7 @@ class PatternDetector:
 
 if __name__ == "__main__":
     # Test improved Carney-based detector
-    import yfinance as yf
+    from data_downloader import download_stock_data
 
     logger.info("="*80)
     logger.info("IMPROVED HARMONIC PATTERN DETECTOR TEST")
@@ -1439,8 +1439,7 @@ if __name__ == "__main__":
     logger.info("")
 
     # Download test data
-    ticker = yf.Ticker("AAPL")
-    df = ticker.history(period="6mo")
+    df = download_stock_data("AAPL", period="6mo", interval="1d")
     df.columns = [c.lower() for c in df.columns]
 
     logger.info("Testing on AAPL - %d days of data", len(df))

@@ -1,7 +1,8 @@
 # Core data and market data libraries
-yfinance>=0.2.31
+defeatbeta-api>=0.0.34  # Fast, reliable market data from Hugging Face (no rate limits!)
+yfinance>=0.2.31  # Kept as fallback (but defeatbeta-api is now primary)
 pandas>=2.0.0
-numpy>=1.24.0
+numpy>=2.2.5  # Required by defeatbeta-api (Python 3.10+ required)
 pyarrow>=14.0.0
 pyharmonics
 

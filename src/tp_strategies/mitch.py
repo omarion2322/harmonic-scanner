@@ -1,5 +1,5 @@
 """
-MITCH Take Profit Strategy
+MITCH Take Profit Strategy.
 
 Mitch Ray's External Market Structure approach.
 Focuses on measured moves, previous support/resistance levels,
@@ -24,17 +24,20 @@ Key Improvements Over v1.0:
 Targets are adaptive, strength-weighted, and based on comprehensive market structure.
 """
 
-from tp_strategies.base import TPStrategy, TPTargets
-import pandas as pd
+from typing import List, Optional, Tuple
+
 import numpy as np
-from typing import List, Tuple, Optional
+import pandas as pd
+
 from logging_config import get_logger
+from tp_strategies.base import TPStrategy, TPTargets
 
 logger = get_logger(__name__)
 
 try:
     import config
     from utils import ConfigHelper
+
     config_helper = ConfigHelper(config)
 except ImportError:
     config = None
@@ -50,7 +53,12 @@ class MitchStrategy(TPStrategy):
     measured moves, and moving averages.
     """
 
-    def __init__(self, swing_window: int = 5, use_tp_scoring_engine: bool = True, tp_min_spacing_pct: float = 20.0) -> None:
+    def __init__(
+        self,
+        swing_window: int = 5,
+        use_tp_scoring_engine: bool = True,
+        tp_min_spacing_pct: float = 20.0
+    ) -> None:
         """
         Initialize Mitch strategy.
 
@@ -69,29 +77,34 @@ class MitchStrategy(TPStrategy):
             try:
                 import sys
                 from pathlib import Path
+
                 # Add src directory to path if not already there
                 src_path = Path(__file__).parent.parent
                 if str(src_path) not in sys.path:
                     sys.path.insert(0, str(src_path))
+
                 from tp_scoring_engine import TPScoringEngine
+
                 self.TPScoringEngine = TPScoringEngine
             except ImportError as e:
                 logger.warning("TP Scoring Engine not available: %s", e)
                 logger.info("Falling back to standard Mitch strategy")
                 self.use_tp_scoring_engine = False
 
-    def calculate_targets(self,
-                         pattern_high: float,
-                         pattern_low: float,
-                         is_bullish: bool,
-                         price_data: pd.DataFrame,
-                         x_price: float,
-                         a_price: float,
-                         b_price: float,
-                         c_price: float,
-                         d_price: float,
-                         d_index: int,
-                         ticker: Optional[str] = None) -> TPTargets:
+    def calculate_targets(
+        self,
+        pattern_high: float,
+        pattern_low: float,
+        is_bullish: bool,
+        price_data: pd.DataFrame,
+        x_price: float,
+        a_price: float,
+        b_price: float,
+        c_price: float,
+        d_price: float,
+        d_index: int,
+        ticker: Optional[str] = None
+    ) -> TPTargets:
         """
         Calculate targets based on external market structure.
 
@@ -102,17 +115,35 @@ class MitchStrategy(TPStrategy):
 
         For scoring engine: Downloads full stock history for comprehensive S/R analysis
         For pattern detection: Uses provided price_data (limited by DATA_PERIOD)
+
+        Args:
+            pattern_high: Highest price in pattern
+            pattern_low: Lowest price in pattern
+            is_bullish: True for bullish pattern
+            price_data: OHLC price DataFrame
+            x_price: Point X price
+            a_price: Point A price
+            b_price: Point B price
+            c_price: Point C price
+            d_price: Point D price (entry price)
+            d_index: Index of point D in price_data
+            ticker: Stock ticker symbol (optional)
+
+        Returns:
+            TPTargets with primary, secondary, and final target prices
         """
         # If using scoring engine, download full history for S/R analysis
         if self.use_tp_scoring_engine and ticker:
             try:
-                import yfinance as yf
-                import config
+                from data_downloader import download_stock_data
 
-                # Download full history for comprehensive S/R analysis
-                stock = yf.Ticker(ticker)
-                data_interval = config_helper.get('DATA_INTERVAL', '1d') if config_helper else '1d'
-                full_history = stock.history(period='max', interval=data_interval, auto_adjust=False)
+                # Download full history for comprehensive S/R analysis using defeatbeta-api
+                data_interval = (
+                    config_helper.get('DATA_INTERVAL', '1d') if config_helper else '1d'
+                )
+                full_history = download_stock_data(
+                    ticker, period='max', interval=data_interval, auto_adjust=False
+                )
 
                 if not full_history.empty and len(full_history) > len(price_data):
                     # Normalize columns to lowercase
@@ -120,8 +151,17 @@ class MitchStrategy(TPStrategy):
 
                     # Find d_index in the full history (match by date)
                     d_date = price_data.index[d_index]
+
+                    # Ensure both indexes are timezone-naive for comparison
+                    if d_date.tz is not None:
+                        d_date = d_date.tz_localize(None)
+                    if full_history.index.tz is not None:
+                        full_history.index = full_history.index.tz_localize(None)
+
                     try:
-                        full_d_index = full_history.index.get_loc(full_history.index[full_history.index >= d_date][0])
+                        full_d_index = full_history.index.get_loc(
+                            full_history.index[full_history.index >= d_date][0]
+                        )
                         historical_data = full_history.iloc[:full_d_index + 1].copy()
                     except (IndexError, KeyError):
                         # If date matching fails, use provided price_data
@@ -135,7 +175,9 @@ class MitchStrategy(TPStrategy):
                 historical_data = price_data.iloc[:d_index + 1].copy()
             except Exception as e:
                 # Unexpected errors
-                logger.warning("[%s] Unexpected error downloading full history for S/R: %s", ticker, e)
+                logger.warning(
+                    "[%s] Unexpected error downloading full history for S/R: %s", ticker, e
+                )
                 historical_data = price_data.iloc[:d_index + 1].copy()
         else:
             # Use provided price_data for pattern detection
@@ -146,28 +188,52 @@ class MitchStrategy(TPStrategy):
             return self._fallback_targets(pattern_high, pattern_low, is_bullish)
 
         # Calculate moving averages for dynamic support/resistance
-        ma_20 = historical_data['close'].rolling(20).mean().iloc[-1] if len(historical_data) >= 20 else None
-        ma_50 = historical_data['close'].rolling(50).mean().iloc[-1] if len(historical_data) >= 50 else None
+        ma_20 = (
+            historical_data['close'].rolling(20).mean().iloc[-1]
+            if len(historical_data) >= 20
+            else None
+        )
+        ma_50 = (
+            historical_data['close'].rolling(50).mean().iloc[-1]
+            if len(historical_data) >= 50
+            else None
+        )
 
         # Find significant swing highs and lows outside the pattern
-        swing_highs, swing_lows = self._find_swing_points(historical_data, window=self.swing_window)
+        swing_highs, swing_lows = self._find_swing_points(
+            historical_data, window=self.swing_window
+        )
 
         if is_bullish:
             targets = self._calculate_bullish_targets(
-                d_price, pattern_high, pattern_low,
-                swing_highs, swing_lows, ma_20, ma_50,
-                historical_data, ticker
+                d_price,
+                pattern_high,
+                pattern_low,
+                swing_highs,
+                swing_lows,
+                ma_20,
+                ma_50,
+                historical_data,
+                ticker,
             )
         else:
             targets = self._calculate_bearish_targets(
-                d_price, pattern_high, pattern_low,
-                swing_highs, swing_lows, ma_20, ma_50,
-                historical_data, ticker
+                d_price,
+                pattern_high,
+                pattern_low,
+                swing_highs,
+                swing_lows,
+                ma_20,
+                ma_50,
+                historical_data,
+                ticker,
             )
 
         return targets
 
-    def _find_swing_points(self, data: pd.DataFrame, window: int) -> Tuple[List[float], List[float]]:
+    def _find_swing_points(
+        self, data: pd.DataFrame, window: int
+    ) -> Tuple[List[float], List[float]]:
         """
         Identify significant swing highs and lows in the historical data.
 
@@ -178,35 +244,52 @@ class MitchStrategy(TPStrategy):
         Returns:
             Tuple of (swing_highs, swing_lows) lists
         """
-        swing_highs = []
-        swing_lows = []
+        swing_highs: List[float] = []
+        swing_lows: List[float] = []
 
         highs = data['high'].values
         lows = data['low'].values
 
         for i in range(window, len(data) - window):
             # Check for swing high
-            if highs[i] == max(highs[i - window:i + window + 1]):
+            if highs[i] == max(highs[i - window : i + window + 1]):
                 swing_highs.append(highs[i])
 
             # Check for swing low
-            if lows[i] == min(lows[i - window:i + window + 1]):
+            if lows[i] == min(lows[i - window : i + window + 1]):
                 swing_lows.append(lows[i])
 
         return swing_highs, swing_lows
 
-    def _calculate_bullish_targets(self,
-                                   d_price: float,
-                                   pattern_high: float,
-                                   pattern_low: float,
-                                   swing_highs: List[float],
-                                   swing_lows: List[float],
-                                   ma_20: Optional[float],
-                                   ma_50: Optional[float],
-                                   historical_data: pd.DataFrame,
-                                   ticker: Optional[str] = None) -> TPTargets:
-        """Calculate targets for bullish patterns using external structure."""
+    def _calculate_bullish_targets(
+        self,
+        d_price: float,
+        pattern_high: float,
+        pattern_low: float,
+        swing_highs: List[float],
+        swing_lows: List[float],
+        ma_20: Optional[float],
+        ma_50: Optional[float],
+        historical_data: pd.DataFrame,
+        ticker: Optional[str] = None,
+    ) -> TPTargets:
+        """
+        Calculate targets for bullish patterns using external structure.
 
+        Args:
+            d_price: Point D price (entry)
+            pattern_high: Highest price in pattern
+            pattern_low: Lowest price in pattern
+            swing_highs: List of swing high prices
+            swing_lows: List of swing low prices
+            ma_20: 20-period moving average
+            ma_50: 50-period moving average
+            historical_data: Full historical price data
+            ticker: Stock ticker symbol
+
+        Returns:
+            TPTargets with calculated target prices
+        """
         # CHECK IF TP SCORING ENGINE IS ENABLED
         if self.use_tp_scoring_engine:
             try:
@@ -218,7 +301,7 @@ class MitchStrategy(TPStrategy):
                     entry_price=d_price,
                     direction="LONG",
                     harmonic_targets=None,  # Could pass pattern projections for alignment
-                    min_spacing_pct=self.tp_min_spacing_pct
+                    min_spacing_pct=self.tp_min_spacing_pct,
                 )
 
                 if tp1 is not None:
@@ -227,24 +310,34 @@ class MitchStrategy(TPStrategy):
                     tp2_pct = ((tp2 - d_price) / d_price) * 100
                     tp3_pct = ((tp3 - d_price) / d_price) * 100
 
-                    desc = f"Mitch Ray (TP Engine): T1 @ {tp1:.2f} (+{tp1_pct:.0f}%), T2 @ {tp2:.2f} (+{tp2_pct:.0f}%), T3 @ {tp3:.2f} (+{tp3_pct:.0f}%)"
+                    desc = (
+                        f"Mitch Ray (TP Engine): T1 @ {tp1:.2f} (+{tp1_pct:.0f}%), "
+                        f"T2 @ {tp2:.2f} (+{tp2_pct:.0f}%), T3 @ {tp3:.2f} (+{tp3_pct:.0f}%)"
+                    )
 
                     return TPTargets(
                         primary=tp1,
                         secondary=tp2,
                         final=tp3,
                         description=desc,
-                        tp_strategy_used="Scoring Engine"
+                        tp_strategy_used="Scoring Engine",
                     )
                 else:
-                    logger.debug("[%s] TP Scoring Engine found no valid zones, falling back to standard method", ticker or "N/A")
+                    logger.debug(
+                        "[%s] TP Scoring Engine found no valid zones, falling back to standard method",
+                        ticker or "N/A",
+                    )
             except (ValueError, KeyError, IndexError) as e:
                 # Expected errors from scoring engine data processing
-                logger.debug("[%s] TP Scoring Engine failed (data error): %s", ticker or "N/A", e)
+                logger.debug(
+                    "[%s] TP Scoring Engine failed (data error): %s", ticker or "N/A", e
+                )
                 logger.debug("[%s] Falling back to standard Mitch strategy", ticker or "N/A")
             except Exception as e:
                 # Unexpected errors
-                logger.warning("[%s] TP Scoring Engine failed unexpectedly: %s", ticker or "N/A", e)
+                logger.warning(
+                    "[%s] TP Scoring Engine failed unexpectedly: %s", ticker or "N/A", e
+                )
                 logger.debug("[%s] Falling back to standard Mitch strategy", ticker or "N/A")
 
         # STANDARD METHOD: Fixed percentages from analysis
@@ -258,43 +351,64 @@ class MitchStrategy(TPStrategy):
         #   T1 @ 75% = Matches actual average, captures early momentum (66%+ hit rate)
         #   T2 @ 130% = Matches actual average, median move level (40%+ hit rate)
         #   T3 @ 200% = Realistic stretch target based on actual data (25%+ hit rate)
-        MIN_TARGET_DISTANCE_PCT = 75.0   # T1 - matches actual 73.8% average
-        TARGET_T2_PCT = 200.0       # T2 - matches actual 128.2% average - was 161 previously
-        TARGET_T3_PCT = 400.0            # T3 - realistic based on 179.5% avg - was 250 previously
+        MIN_TARGET_DISTANCE_PCT = 75.0  # T1 - matches actual 73.8% average
+        TARGET_T2_PCT = 200.0  # T2 - matches actual 128.2% average - was 161 previously
+        TARGET_T3_PCT = 400.0  # T3 - realistic based on 179.5% avg - was 250 previously
 
         # SIMPLIFIED: Calculate targets directly at fixed percentages
         # No complex candidate selection - just use the percentages we determined from data
-        primary = d_price * (1 + MIN_TARGET_DISTANCE_PCT / 100)   # 75% from entry
-        secondary = d_price * (1 + TARGET_T2_PCT / 100)            # 130% from entry
-        final = d_price * (1 + TARGET_T3_PCT / 100)                # 200% from entry
+        primary = d_price * (1 + MIN_TARGET_DISTANCE_PCT / 100)  # 75% from entry
+        secondary = d_price * (1 + TARGET_T2_PCT / 100)  # 130% from entry
+        final = d_price * (1 + TARGET_T3_PCT / 100)  # 200% from entry
 
         # Ensure targets are in ascending order (safety check)
         if not (primary < secondary < final):
             # Fallback to pattern-based targets if calculation failed
             return self._fallback_targets(pattern_high, pattern_low, is_bullish=True)
 
-        desc = f"Mitch Ray: T1 @ {primary:.2f} (+{MIN_TARGET_DISTANCE_PCT:.0f}%), T2 @ {secondary:.2f} (+{TARGET_T2_PCT:.0f}%), T3 @ {final:.2f} (+{TARGET_T3_PCT:.0f}%)"
+        desc = (
+            f"Mitch Ray: T1 @ {primary:.2f} (+{MIN_TARGET_DISTANCE_PCT:.0f}%), "
+            f"T2 @ {secondary:.2f} (+{TARGET_T2_PCT:.0f}%), "
+            f"T3 @ {final:.2f} (+{TARGET_T3_PCT:.0f}%)"
+        )
 
         return TPTargets(
             primary=primary,
             secondary=secondary,
             final=final,
             description=desc,
-            tp_strategy_used="Fixed"
+            tp_strategy_used="Fixed",
         )
 
-    def _calculate_bearish_targets(self,
-                                   d_price: float,
-                                   pattern_high: float,
-                                   pattern_low: float,
-                                   swing_highs: List[float],
-                                   swing_lows: List[float],
-                                   ma_20: Optional[float],
-                                   ma_50: Optional[float],
-                                   historical_data: pd.DataFrame,
-                                   ticker: Optional[str] = None) -> TPTargets:
-        """Calculate targets for bearish patterns using external structure."""
+    def _calculate_bearish_targets(
+        self,
+        d_price: float,
+        pattern_high: float,
+        pattern_low: float,
+        swing_highs: List[float],
+        swing_lows: List[float],
+        ma_20: Optional[float],
+        ma_50: Optional[float],
+        historical_data: pd.DataFrame,
+        ticker: Optional[str] = None,
+    ) -> TPTargets:
+        """
+        Calculate targets for bearish patterns using external structure.
 
+        Args:
+            d_price: Point D price (entry)
+            pattern_high: Highest price in pattern
+            pattern_low: Lowest price in pattern
+            swing_highs: List of swing high prices
+            swing_lows: List of swing low prices
+            ma_20: 20-period moving average
+            ma_50: 50-period moving average
+            historical_data: Full historical price data
+            ticker: Stock ticker symbol
+
+        Returns:
+            TPTargets with calculated target prices
+        """
         # CHECK IF TP SCORING ENGINE IS ENABLED
         if self.use_tp_scoring_engine:
             try:
@@ -306,7 +420,7 @@ class MitchStrategy(TPStrategy):
                     entry_price=d_price,
                     direction="SHORT",  # CRITICAL: Use SHORT for bearish patterns
                     harmonic_targets=None,  # Could pass pattern projections for alignment
-                    min_spacing_pct=self.tp_min_spacing_pct
+                    min_spacing_pct=self.tp_min_spacing_pct,
                 )
 
                 if tp1 is not None:
@@ -315,24 +429,39 @@ class MitchStrategy(TPStrategy):
                     tp2_pct = ((d_price - tp2) / d_price) * 100
                     tp3_pct = ((d_price - tp3) / d_price) * 100
 
-                    desc = f"Mitch Ray (TP Engine): T1 @ {tp1:.2f} (-{tp1_pct:.0f}%), T2 @ {tp2:.2f} (-{tp2_pct:.0f}%), T3 @ {tp3:.2f} (-{tp3_pct:.0f}%)"
+                    desc = (
+                        f"Mitch Ray (TP Engine): T1 @ {tp1:.2f} (-{tp1_pct:.0f}%), "
+                        f"T2 @ {tp2:.2f} (-{tp2_pct:.0f}%), T3 @ {tp3:.2f} (-{tp3_pct:.0f}%)"
+                    )
 
                     return TPTargets(
                         primary=tp1,
                         secondary=tp2,
                         final=tp3,
                         description=desc,
-                        tp_strategy_used="Scoring Engine"
+                        tp_strategy_used="Scoring Engine",
                     )
                 else:
-                    logger.debug("[%s] TP Scoring Engine found no valid zones for SHORT, falling back to standard method", ticker or "N/A")
+                    logger.debug(
+                        "[%s] TP Scoring Engine found no valid zones for SHORT, "
+                        "falling back to standard method",
+                        ticker or "N/A",
+                    )
             except (ValueError, KeyError, IndexError) as e:
                 # Expected errors from scoring engine data processing
-                logger.debug("[%s] TP Scoring Engine failed for SHORT (data error): %s", ticker or "N/A", e)
+                logger.debug(
+                    "[%s] TP Scoring Engine failed for SHORT (data error): %s",
+                    ticker or "N/A",
+                    e,
+                )
                 logger.debug("[%s] Falling back to standard Mitch strategy", ticker or "N/A")
             except Exception as e:
                 # Unexpected errors
-                logger.warning("[%s] TP Scoring Engine failed for SHORT unexpectedly: %s", ticker or "N/A", e)
+                logger.warning(
+                    "[%s] TP Scoring Engine failed for SHORT unexpectedly: %s",
+                    ticker or "N/A",
+                    e,
+                )
                 logger.debug("[%s] Falling back to standard Mitch strategy", ticker or "N/A")
 
         # STANDARD METHOD: Fixed percentages from analysis
@@ -350,30 +479,44 @@ class MitchStrategy(TPStrategy):
 
         # SIMPLIFIED: Calculate targets directly at fixed percentages
         # No complex candidate selection - just use the percentages we determined from data
-        primary = d_price * (1 - MIN_TARGET_DISTANCE_PCT / 100)   # 21.2% down from entry
-        secondary = d_price * (1 - TARGET_T2_PCT / 100)            # 42.9% down from entry
-        final = d_price * (1 - TARGET_T3_PCT / 100)                # 77.9% down from entry
+        primary = d_price * (1 - MIN_TARGET_DISTANCE_PCT / 100)  # 21.2% down from entry
+        secondary = d_price * (1 - TARGET_T2_PCT / 100)  # 42.9% down from entry
+        final = d_price * (1 - TARGET_T3_PCT / 100)  # 77.9% down from entry
 
         # Ensure targets are in descending order for SHORT (safety check)
         if not (primary > secondary > final):
             # Fallback to pattern-based targets if calculation failed
             return self._fallback_targets(pattern_high, pattern_low, is_bullish=False)
 
-        desc = f"Mitch Ray: T1 @ {primary:.2f} (-{MIN_TARGET_DISTANCE_PCT:.0f}%), T2 @ {secondary:.2f} (-{TARGET_T2_PCT:.0f}%), T3 @ {final:.2f} (-{TARGET_T3_PCT:.0f}%)"
+        desc = (
+            f"Mitch Ray: T1 @ {primary:.2f} (-{MIN_TARGET_DISTANCE_PCT:.0f}%), "
+            f"T2 @ {secondary:.2f} (-{TARGET_T2_PCT:.0f}%), "
+            f"T3 @ {final:.2f} (-{TARGET_T3_PCT:.0f}%)"
+        )
 
         return TPTargets(
             primary=primary,
             secondary=secondary,
             final=final,
             description=desc,
-            tp_strategy_used="Fixed"
+            tp_strategy_used="Fixed",
         )
 
-    def _fallback_targets(self, pattern_high: float, pattern_low: float, is_bullish: bool) -> TPTargets:
+    def _fallback_targets(
+        self, pattern_high: float, pattern_low: float, is_bullish: bool
+    ) -> TPTargets:
         """
         Fallback to simple pattern-based targets when insufficient external structure.
 
         Uses 50% and 75% of pattern range as conservative approximations.
+
+        Args:
+            pattern_high: Highest price in pattern
+            pattern_low: Lowest price in pattern
+            is_bullish: True for bullish pattern
+
+        Returns:
+            TPTargets with fallback target prices
         """
         pattern_range = pattern_high - pattern_low
 
@@ -386,21 +529,26 @@ class MitchStrategy(TPStrategy):
             secondary = pattern_high - (pattern_range * 0.75)
             final = pattern_low
 
-        description = f"Mitch Ray (Fallback): 50% @ {primary:.2f}, 75% @ {secondary:.2f}, 100% @ {final:.2f}"
+        description = (
+            f"Mitch Ray (Fallback): 50% @ {primary:.2f}, "
+            f"75% @ {secondary:.2f}, 100% @ {final:.2f}"
+        )
 
         return TPTargets(
             primary=primary,
             secondary=secondary,
             final=final,
             description=description,
-            tp_strategy_used="Fixed"
+            tp_strategy_used="Fixed",
         )
 
-    def _find_strongest_support_resistance(self,
-                                           swing_highs: List[float],
-                                           swing_lows: List[float],
-                                           d_price: float,
-                                           is_bullish: bool) -> Optional[float]:
+    def _find_strongest_support_resistance(
+        self,
+        swing_highs: List[float],
+        swing_lows: List[float],
+        d_price: float,
+        is_bullish: bool,
+    ) -> Optional[float]:
         """
         Find the strongest support/resistance level based on clustering.
 
@@ -429,7 +577,7 @@ class MitchStrategy(TPStrategy):
         # Find clusters of swing points (levels that have been tested multiple times)
         # Use 3% tolerance for clustering (balanced precision for pattern context)
         cluster_tolerance = 0.03
-        clusters = []
+        clusters: List[Tuple[float, int]] = []
 
         for price in candidates:
             # Find all prices within 3% of this price
@@ -443,24 +591,31 @@ class MitchStrategy(TPStrategy):
 
         # Sort clusters by strength (number of touches)
         # If tied, prefer the one closer to D (most recent)
-        clusters.sort(key=lambda x: (-x[1], -abs(x[0] - d_price) if is_bullish else abs(x[0] - d_price)))
+        clusters.sort(
+            key=lambda x: (
+                -x[1],
+                -abs(x[0] - d_price) if is_bullish else abs(x[0] - d_price),
+            )
+        )
 
         # Return the strongest cluster's average price
         return clusters[0][0]
 
-    def calculate_stop_loss(self,
-                           pattern_high: float,
-                           pattern_low: float,
-                           is_bullish: bool,
-                           price_data: pd.DataFrame,
-                           x_price: float,
-                           a_price: float,
-                           b_price: float,
-                           c_price: float,
-                           d_price: float,
-                           d_index: int,
-                           max_allowed_stop_loss_pct: float,
-                           min_allowed_stop_loss_pct: Optional[float] = None) -> float:
+    def calculate_stop_loss(
+        self,
+        pattern_high: float,
+        pattern_low: float,
+        is_bullish: bool,
+        price_data: pd.DataFrame,
+        x_price: float,
+        a_price: float,
+        b_price: float,
+        c_price: float,
+        d_price: float,
+        d_index: int,
+        max_allowed_stop_loss_pct: float,
+        min_allowed_stop_loss_pct: Optional[float] = None,
+    ) -> float:
         """
         Calculate stop loss using Mitch Ray's external market structure approach.
 
@@ -472,9 +627,15 @@ class MitchStrategy(TPStrategy):
         3. Option B: Use MAX_ALLOWED_STOP_LOSS_PCT as fallback
 
         Args:
-            d_price: Point D price (entry point)
+            pattern_high: Highest price in pattern
+            pattern_low: Lowest price in pattern
             is_bullish: True for bullish pattern
             price_data: Full price history
+            x_price: Point X price
+            a_price: Point A price
+            b_price: Point B price
+            c_price: Point C price
+            d_price: Point D price (entry point)
             d_index: Index of point D
             max_allowed_stop_loss_pct: Maximum stop loss percentage from config
             min_allowed_stop_loss_pct: Minimum stop loss percentage from config
@@ -483,11 +644,15 @@ class MitchStrategy(TPStrategy):
             Stop loss price
         """
         # Use ALL historical data up to point D
-        historical_data = price_data.iloc[:d_index + 1].copy()
+        historical_data = price_data.iloc[: d_index + 1].copy()
 
         # Get min_allowed from config if not provided
         if min_allowed_stop_loss_pct is None:
-            min_allowed_stop_loss_pct = config_helper.get_float('MIN_ALLOWED_STOP_LOSS_PCT', 3.0) if config_helper else 3.0
+            min_allowed_stop_loss_pct = (
+                config_helper.get_float('MIN_ALLOWED_STOP_LOSS_PCT', 3.0)
+                if config_helper
+                else 3.0
+            )
 
         # Calculate acceptable stop loss range
         if is_bullish:
@@ -504,7 +669,9 @@ class MitchStrategy(TPStrategy):
             max_allowed_stop = d_price * (1 + max_allowed_stop_loss_pct / 100)
 
         # Find swing points for analysis
-        swing_highs, swing_lows = self._find_swing_points(historical_data, window=self.swing_window)
+        swing_highs, swing_lows = self._find_swing_points(
+            historical_data, window=self.swing_window
+        )
 
         # OPTION A: Most recent swing low/high
         if is_bullish and len(swing_lows) > 0:
@@ -548,4 +715,5 @@ class MitchStrategy(TPStrategy):
             return d_price * (1 + max_allowed_stop_loss_pct / 100)
 
     def get_strategy_name(self) -> str:
+        """Get strategy name identifier."""
         return "MITCH"

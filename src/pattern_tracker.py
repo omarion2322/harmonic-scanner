@@ -584,8 +584,9 @@ class PatternTracker:
             max_favorable = favorable_moves.max()
             max_adverse = adverse_moves.max()
 
-            snapshot.max_favorable_move = max_favorable
-            snapshot.max_adverse_move = max_adverse
+            # Ensure values are non-negative (can be negative if price never moved against pattern)
+            snapshot.max_favorable_move = max(0.0, max_favorable)
+            snapshot.max_adverse_move = max(0.0, max_adverse)
 
             # Check for stop loss hit
             if snapshot.is_bullish:
