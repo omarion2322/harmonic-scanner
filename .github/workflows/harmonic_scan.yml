@@ -3,7 +3,7 @@ name: Harmonic Scan
 on:
   # Scheduled run - runs BOTH daily and weekly concurrently
   schedule:
-    - cron: '30 22 * * 1-5'  # Mon-Fri at 10:30 PM UTC (5:30 PM EST / 6:30 PM EDT) - scans both 1d and 1wk timeframes
+    - cron: '0 0 * * 2,3,4,5,6'  # Tue-Sat at 00:00 UTC - captures Mon-Fri close data
 
   # Manual trigger with multiple timeframe selection
   workflow_dispatch:
@@ -52,7 +52,7 @@ jobs:
             echo "tp_strategy=MITCH" >> $GITHUB_OUTPUT
             echo "include_crypto=false" >> $GITHUB_OUTPUT
             echo "max_stocks=" >> $GITHUB_OUTPUT
-            echo "📊 Scheduled: Concurrent Daily (1d) + Weekly (1wk) Scan - 5 min after market close"
+            echo "📊 Scheduled: Concurrent Daily (1d) + Weekly (1wk) Scan - after previous day close"
           else
             # Manual trigger - use provided inputs
             TIMEFRAMES="${{ github.event.inputs.timeframes }}"
