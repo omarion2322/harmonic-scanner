@@ -105,7 +105,11 @@ def check_trade_status(trade: Dict, investment_per_trade: float = 10000.0) -> Tr
     try:
         # Get historical data from detected date to now
         ticker_obj = yf.Ticker(trade['ticker'])
-        hist = ticker_obj.history(start=trade['detected_date'], end=datetime.now())
+        hist = ticker_obj.history(start=trade['detected_date'], end=datetime.now(), interval='1d')
+
+        # If empty (e.g., weekend start date), fallback to 5d period
+        if hist.empty:
+            hist = ticker_obj.history(period='5d', interval='1d')
 
         if hist.empty:
             # Return default status if no data
