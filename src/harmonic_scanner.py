@@ -22,6 +22,7 @@ from crypto_data_downloader import download_crypto_data
 from pattern_tracker import PatternTracker, PatternStatus
 from utils import ConfigHelper, PathManager, FormattingUtils, TickerManager
 from logging_config import get_logger
+from sector_etf_analyzer import SectorETFAnalyzer
 from scanner_helpers import (
     ScanProgressTracker,
     FailedDownloadRetrier,
@@ -120,6 +121,7 @@ class HarmonicScanner:
         self.config_helper = ConfigHelper(config)
         self.path_manager = PathManager()
         self.asset_type = asset_type  # 'stocks' or 'crypto' - determines report directory
+        self.sector_etf_analyzer = SectorETFAnalyzer()
 
     def get_sp500_tickers(self) -> List[str]:
         """
@@ -276,12 +278,28 @@ class HarmonicScanner:
             # Only generate chart if signal is BUY or SELL (actionable)
             chart_path = None
             reaction_data = None
+            sector_etf_analysis = None
             auto_save_charts = self.config_helper.get_bool('AUTO_SAVE_CHARTS', True)
 
             if signal in ['BUY', 'SELL'] and auto_save_charts:
                 # Detect Type 1 and Type 2 reactions for the pattern
                 current_idx = len(df) - 1
                 reaction_data = self.reaction_detector.detect_reaction(df, latest_pattern, current_idx)
+
+                if self.asset_type == 'stocks':
+                    try:
+                        sector_etf_analysis = self.sector_etf_analyzer.analyze(
+                            ticker=ticker,
+                            signal=signal,
+                            interval=data_interval,
+                            period=data_period,
+                        )
+                    except (KeyError, TypeError, ValueError) as e:
+                        logger.warning(
+                            "%s: Could not calculate sector ETF confluence: %s",
+                            ticker,
+                            e,
+                        )
 
                 # Get chart directory using PathManager
                 chart_dir = str(self.path_manager.get_chart_dir(interval=data_interval, asset_type=self.asset_type))
@@ -290,7 +308,9 @@ class HarmonicScanner:
                 try:
                     chart_path = self.detector.generate_pattern_chart(
                         latest_pattern, ticker, df, chart_dir,
-                        interval=data_interval, reaction_data=reaction_data
+                        interval=data_interval,
+                        reaction_data=reaction_data,
+                        sector_etf_analysis=sector_etf_analysis
                     )
                     latest_pattern.chart_path = chart_path
                 except (OSError, IOError) as e:
@@ -311,6 +331,7 @@ class HarmonicScanner:
                 'current_price': current_price,
                 'chart_path': chart_path,
                 'reaction_data': reaction_data,
+                'sector_etf_analysis': sector_etf_analysis,
                 '_df': df  # Include DataFrame for pattern tracker (avoid re-download)
             }
 
@@ -697,6 +718,8 @@ class HarmonicScanner:
                     )
                     report_lines.extend(reaction_lines)
 
+                self._append_sector_etf_report(report_lines, analysis)
+
                 # Add chart reference if available
                 if analysis.get('chart_path'):
                     report_lines.append("")
@@ -746,6 +769,8 @@ class HarmonicScanner:
                         analysis['reaction_data'], pattern
                     )
                     report_lines.extend(reaction_lines)
+
+                self._append_sector_etf_report(report_lines, analysis)
 
                 # Add chart reference if available
                 if analysis.get('chart_path'):
@@ -849,6 +874,32 @@ class HarmonicScanner:
         report_lines.append("="*80)
 
         return "\n".join(report_lines)
+
+    @staticmethod
+    def _append_sector_etf_report(
+        report_lines: List[str],
+        analysis: Dict[str, Any]
+    ) -> None:
+        """Append sector ETF trend confluence to an actionable signal."""
+        sector_context = analysis.get('sector_etf_analysis')
+        if not sector_context:
+            return
+
+        report_lines.append("")
+        report_lines.append(
+            f"  Relevant ETF: {sector_context.etf_ticker} "
+            f"({sector_context.theme})"
+        )
+        report_lines.append(
+            f"  ETF Selection: {sector_context.selection_reason}"
+        )
+        report_lines.append(
+            f"  ETF Trend: {sector_context.trend} | "
+            f"20-Period Return: {sector_context.return_20_period_pct:+.1f}%"
+        )
+        report_lines.append(
+            f"  Signal Confluence: {sector_context.confluence_label}"
+        )
 
     def save_report(self, report: str) -> str:
         """Save report to file in reports/<date>/ directory"""

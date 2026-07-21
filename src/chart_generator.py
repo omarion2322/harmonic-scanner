@@ -28,6 +28,7 @@ from exceptions import ChartGenerationError
 if TYPE_CHECKING:
     from pattern_detector import HarmonicPattern
     from reaction_detector import ReactionData
+    from sector_etf_analyzer import SectorETFAnalysis
 
 logger = get_logger(__name__)
 
@@ -61,7 +62,8 @@ class ChartGenerator:
         df: pd.DataFrame,
         chart_dir: str,
         interval: str = '1d',
-        reaction_data: Optional['ReactionData'] = None
+        reaction_data: Optional['ReactionData'] = None,
+        sector_etf_analysis: Optional['SectorETFAnalysis'] = None
     ) -> str:
         """
         Generate a chart visualization of the harmonic pattern.
@@ -73,6 +75,7 @@ class ChartGenerator:
             chart_dir: Directory to save the chart
             interval: Time interval ('1d', '1wk', '1mo', etc.)
             reaction_data: Optional ReactionData object with Type 1/Type 2 analysis
+            sector_etf_analysis: Optional sector ETF trend confluence
 
         Returns:
             Path to the saved chart image
@@ -108,6 +111,9 @@ class ChartGenerator:
 
             # Add trading info box
             self._add_info_box(ax, pattern, reaction_data)
+
+            if sector_etf_analysis:
+                self._add_sector_etf_box(ax, sector_etf_analysis)
 
             # Configure axes
             self._configure_axes(ax, pattern, reaction_data)
@@ -713,6 +719,62 @@ class ChartGenerator:
             info += "Type 2: WATCHING\n"
 
         return info
+
+    def _format_sector_etf_info(
+        self,
+        analysis: 'SectorETFAnalysis'
+    ) -> str:
+        """Format sector ETF trend confluence for the chart info box."""
+        trend_marker = {"UP": "+", "DOWN": "-", "MIXED": "~"}.get(
+            analysis.trend,
+            "?",
+        )
+        return (
+            f"\nRELEVANT ETF CONFLUENCE\n"
+            f"{'-' * 20}\n"
+            f"{analysis.theme}: {analysis.etf_ticker}\n"
+            f"Trend: {trend_marker} {analysis.trend}\n"
+            f"20-period return: {analysis.return_20_period_pct:+.1f}%\n"
+            f"Price / SMA20 / SMA50:\n"
+            f"  \\${analysis.current_price:.2f} / "
+            f"\\${analysis.sma_20:.2f} / \\${analysis.sma_50:.2f}\n"
+            f"Signal: {analysis.confluence_label}\n"
+        )
+
+    def _add_sector_etf_box(
+        self,
+        ax: plt.Axes,
+        analysis: 'SectorETFAnalysis'
+    ) -> None:
+        """Add a prominent relevant ETF confluence card."""
+        if analysis.confirms_signal:
+            facecolor = "#e8f5e9"
+            edgecolor = "#2e7d32"
+        elif analysis.trend == "MIXED":
+            facecolor = "#fff8e1"
+            edgecolor = "#f9a825"
+        else:
+            facecolor = "#ffebee"
+            edgecolor = "#c62828"
+
+        ax.text(
+            0.98,
+            0.98,
+            self._format_sector_etf_info(analysis),
+            transform=ax.transAxes,
+            fontsize=9,
+            verticalalignment="top",
+            horizontalalignment="right",
+            family="monospace",
+            zorder=20,
+            bbox=dict(
+                boxstyle="round,pad=0.8",
+                facecolor=facecolor,
+                edgecolor=edgecolor,
+                alpha=0.95,
+                linewidth=2,
+            ),
+        )
 
     def _configure_axes(
         self,

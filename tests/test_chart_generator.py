@@ -17,6 +17,7 @@ sys.path.insert(0, str(src_path))
 from chart_generator import ChartGenerator
 from pattern_detector import HarmonicPattern, Point
 from exceptions import ChartGenerationError
+from sector_etf_analyzer import SectorETFAnalysis
 
 
 class TestChartGeneratorInitialization:
@@ -170,6 +171,35 @@ class TestGeneratePatternChart:
             chart_dir=str(tmp_path),
             interval='1d',
             reaction_data=reaction_data
+        )
+
+        assert Path(chart_path).exists()
+
+    def test_generate_chart_with_sector_etf_confluence(
+        self, sample_pattern, sample_price_data, tmp_path
+    ):
+        """Test chart generation with sector ETF trend context."""
+        generator = ChartGenerator(dpi=100)
+        sector_context = SectorETFAnalysis(
+            theme="Artificial Intelligence",
+            etf_ticker="IVES",
+            selection_reason="Validated relevant ETF",
+            ranked_candidates=(),
+            trend="UP",
+            current_price=250.0,
+            sma_20=245.0,
+            sma_50=235.0,
+            return_20_period_pct=4.5,
+            confirms_signal=True,
+        )
+
+        chart_path = generator.generate_pattern_chart(
+            pattern=sample_pattern,
+            ticker="AAPL",
+            df=sample_price_data,
+            chart_dir=str(tmp_path),
+            interval="1d",
+            sector_etf_analysis=sector_context,
         )
 
         assert Path(chart_path).exists()
