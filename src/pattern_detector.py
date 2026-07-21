@@ -1069,7 +1069,8 @@ class PatternDetector:
 
     def generate_pattern_chart(self, pattern: HarmonicPattern, ticker: str,
                                df: pd.DataFrame, chart_dir: str, interval: str = '1d',
-                               reaction_data: Optional[Any] = None) -> str:
+                               reaction_data: Optional[Any] = None,
+                               sector_etf_analysis: Optional[Any] = None) -> str:
         """
         Generate a chart visualization of the harmonic pattern with Type 1/Type 2 reaction overlay.
 
@@ -1091,7 +1092,8 @@ class PatternDetector:
             df=df,
             chart_dir=chart_dir,
             interval=interval,
-            reaction_data=reaction_data
+            reaction_data=reaction_data,
+            sector_etf_analysis=sector_etf_analysis
         )
 
     def generate_signal(self, pattern: HarmonicPattern, current_price: float,
