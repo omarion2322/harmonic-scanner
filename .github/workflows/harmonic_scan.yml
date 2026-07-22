@@ -151,6 +151,12 @@ jobs:
               REPORT_DATE=$(date +%Y-%m-%d)
               if [ -d "reports/$REPORT_DATE" ]; then
                 python scripts/extract_trades.py --date $REPORT_DATE --timeframe $TIMEFRAME || true
+
+                if python scripts/export_tradingview.py --date $REPORT_DATE --timeframe $TIMEFRAME; then
+                  echo "✅ TradingView watchlist artifacts generated for $TIMEFRAME"
+                else
+                  echo "⚠️ Failed to generate TradingView watchlist artifacts for $TIMEFRAME"
+                fi
               fi
             else
               echo ""
@@ -468,4 +474,3 @@ jobs:
                  }]
                }" \
                $DISCORD_WEBHOOK
-
