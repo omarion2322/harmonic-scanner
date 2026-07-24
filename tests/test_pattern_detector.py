@@ -318,6 +318,84 @@ class TestCalculateFibonacciRatios:
         assert result['ad_xa'] == 0.786
 
 
+class TestFiveZeroDefinition:
+    """Test Scott Carney's defining 5-0 measurements."""
+
+    def test_five_zero_spec_uses_correct_legs(self):
+        detector = PatternDetector()
+        spec = detector.patterns['5_0']
+
+        assert (spec.b_point_min, spec.b_point_max) == (1.13, 1.618)
+        assert (spec.c_point_min, spec.c_point_max) == (1.618, 2.24)
+        assert (spec.bc_projection_min, spec.bc_projection_max) == (0.5, 0.5)
+        assert spec.is_extension is False
+
+    def test_valid_five_zero_geometry(self):
+        detector = PatternDetector()
+        points = {
+            'x': Point(0, 100.0, pd.Timestamp('2023-01-01'), 'PEAK'),
+            'a': Point(1, 90.0, pd.Timestamp('2023-01-02'), 'TROUGH'),
+            'b': Point(2, 105.0, pd.Timestamp('2023-01-03'), 'PEAK'),
+            'c': Point(3, 75.0, pd.Timestamp('2023-01-04'), 'TROUGH'),
+            'd': Point(4, 90.0, pd.Timestamp('2023-01-05'), 'PEAK'),
+        }
+
+        ratios = detector._calculate_five_zero_ratios(points)
+
+        assert ratios['ab_xa'] == pytest.approx(1.5)
+        assert ratios['bc_ab'] == pytest.approx(2.0)
+        assert ratios['cd_bc'] == pytest.approx(0.5)
+        assert ratios['cd_ab'] == pytest.approx(1.0)
+        assert detector._validate_five_zero_structure(
+            ratios, detector.patterns['5_0'], 0.03
+        )
+
+    def test_rejects_missing_reciprocal_abcd(self):
+        detector = PatternDetector()
+        ratios = {
+            'ab_xa': 1.5,
+            'bc_ab': 1.8,
+            'bc_projection': 0.5,
+            'cd_bc': 0.5,
+            'ad_xa': 0.5,
+            'cd_ab': 0.9,
+        }
+
+        assert not detector._validate_five_zero_structure(
+            ratios, detector.patterns['5_0'], 0.03
+        )
+
+    def test_finds_six_point_five_zero_without_deep_shark_remap(self):
+        detector = PatternDetector()
+        dates = pd.date_range('2023-01-01', periods=6, freq='D')
+        tech = Mock()
+        tech.df = pd.DataFrame(index=dates)
+        tech.peak_data = [
+            (0, 80.0, 0),   # 0
+            (1, 100.0, 1),  # X
+            (2, 90.0, 0),   # A
+            (3, 105.0, 1),  # B: 1.5 XA
+            (4, 75.0, 0),   # C: 2.0 AB
+            (5, 90.0, 1),   # D: 0.5 BC and AB=CD
+        ]
+
+        candidates = detector._find_five_zero_candidates(tech, 0.03)
+
+        assert len(candidates) == 1
+        candidate = candidates[0]
+        assert candidate['origin'].price == 80.0
+        assert candidate['x'].price == 100.0
+        assert candidate['d'].price == 90.0
+        assert candidate['is_bullish'] is True
+
+    def test_deep_shark_is_not_renamed_to_five_zero(self):
+        detector = PatternDetector()
+        py_pattern = Mock()
+        py_pattern.name = 'deep shark'
+
+        assert detector._get_pattern_specification(py_pattern) is None
+
+
 class TestValidateTemporalProportionality:
     """Test _validate_temporal_proportionality method."""
 

@@ -17,8 +17,8 @@ class PatternSpec(BaseModel):
     bc_projection_max: float = Field(..., ge=0.0, le=5.0, description="Maximum BC projection")
     d_point_min: float = Field(..., ge=0.0, le=5.0, description="Minimum D point XA ratio")
     d_point_max: float = Field(..., ge=0.0, le=5.0, description="Maximum D point XA ratio")
-    c_point_min: float = Field(..., ge=0.0, le=2.0, description="Minimum C point AB retracement")
-    c_point_max: float = Field(..., ge=0.0, le=2.0, description="Maximum C point AB retracement")
+    c_point_min: float = Field(..., ge=0.0, le=5.0, description="Minimum C point AB ratio")
+    c_point_max: float = Field(..., ge=0.0, le=5.0, description="Maximum C point AB ratio")
     stop_loss_ratio: float = Field(..., ge=1.0, le=3.0, description="Stop loss ratio")
     is_extension: bool = Field(..., description="True if extends beyond X, False if retracement")
 
@@ -183,17 +183,19 @@ CARNEY_PATTERNS = {
 
     '5_0': PatternSpec(
         name='5-0',
-        b_point_min=1.13,  # B = 1.13-1.618 of A-X
+        b_point_min=1.13,  # AB = 1.13-1.618 projection of XA
         b_point_max=1.618,
         b_tolerance=0.0,  # Tolerance handled by ToleranceLevel
-        bc_projection_min=1.618,  # D = 1.618 BC extension
-        bc_projection_max=1.618,
-        d_point_min=0.50,  # C = 0.5 AB retracement
+        bc_projection_min=0.50,  # CD = 50% retracement of BC
+        bc_projection_max=0.50,
+        # The generic schema stores the completion ratio here. For a 5-0,
+        # completion is measured from BC rather than XA.
+        d_point_min=0.50,
         d_point_max=0.50,
-        c_point_min=0.50,  # C = 0.5 AB retracement (exact)
-        c_point_max=0.50,
+        c_point_min=1.618,  # BC = 1.618-2.24 extension of AB
+        c_point_max=2.24,
         stop_loss_ratio=1.13,
-        is_extension=True  # B extends beyond X
+        is_extension=False  # Carney classifies the 5-0 as a retracement pattern
     )
 }
 
@@ -380,6 +382,13 @@ def calculate_prz_levels(x: float, a: float, b: float, c: float,
     is_bullish = a > x
 
     prz = {}
+
+    if pattern_spec.name == '5-0':
+        # The 5-0 PRZ is the convergence of a 50% BC retracement and
+        # reciprocal AB=CD projected from C.
+        prz['bc_50'] = c + ((b - c) * 0.50)
+        prz['reciprocal_abcd'] = c + (b - a)
+        return prz
 
     # XA retracement/extension for D point
     if is_bullish:

@@ -154,7 +154,11 @@ class ChartGenerator:
         Returns:
             Filtered dataframe
         """
-        pattern_start = pattern.x.date
+        pattern_start = (
+            pattern.origin.date
+            if pattern.pattern_type == '5-0' and pattern.origin
+            else pattern.x.date
+        )
         pattern_end = pattern.d.date
         pattern_duration = pattern_end - pattern_start
 
@@ -266,10 +270,17 @@ class ChartGenerator:
             ax: Matplotlib axes
             pattern: Harmonic pattern
         """
-        pattern_points = [pattern.x, pattern.a, pattern.b, pattern.c, pattern.d]
+        if pattern.pattern_type == '5-0' and pattern.origin:
+            pattern_points = [
+                pattern.origin, pattern.x, pattern.a,
+                pattern.b, pattern.c, pattern.d
+            ]
+            pattern_labels = ['0', 'X', 'A', 'B', 'C', 'D']
+        else:
+            pattern_points = [pattern.x, pattern.a, pattern.b, pattern.c, pattern.d]
+            pattern_labels = ['X', 'A', 'B', 'C', 'D']
         pattern_dates = [p.date for p in pattern_points]
         pattern_prices = [p.price for p in pattern_points]
-        pattern_labels = ['X', 'A', 'B', 'C', 'D']
 
         # Pattern line color based on direction
         pattern_line_color = '#2962ff' if pattern.is_bullish else '#ff6d00'
@@ -308,11 +319,12 @@ class ChartGenerator:
     ) -> None:
         """Plot individual pattern points with labels."""
         # Point colors alternate between peak/trough
-        point_colors = (
-            ['#d32f2f', '#388e3c', '#d32f2f', '#388e3c', '#d32f2f']
-            if pattern.is_bullish
-            else ['#388e3c', '#d32f2f', '#388e3c', '#d32f2f', '#388e3c']
-        )
+        first_color = '#d32f2f' if pattern.is_bullish else '#388e3c'
+        second_color = '#388e3c' if pattern.is_bullish else '#d32f2f'
+        point_colors = [
+            first_color if i % 2 == 0 else second_color
+            for i in range(len(labels))
+        ]
 
         y_offset = (max(prices) - min(prices)) * 0.03
 
@@ -390,6 +402,37 @@ class ChartGenerator:
         ratio_width = 2.5
         ratio_alpha = 0.6
 
+        if pattern.pattern_type == '5-0':
+            reciprocal_ratio = (
+                abs(pattern.d.price - pattern.c.price)
+                / abs(pattern.b.price - pattern.a.price)
+            )
+            vectors = [
+                (
+                    pattern.x, pattern.b, pattern.ab_xa_ratio,
+                    f'{pattern.ab_xa_ratio:.3f} XA'
+                ),
+                (
+                    pattern.a, pattern.c, pattern.bc_ab_ratio,
+                    f'{pattern.bc_ab_ratio:.3f} AB'
+                ),
+                (
+                    pattern.b, pattern.d, pattern.cd_bc_ratio,
+                    f'{pattern.cd_bc_ratio:.3f} BC'
+                ),
+                (
+                    pattern.c, pattern.d, reciprocal_ratio,
+                    f'AB=CD {reciprocal_ratio:.3f}'
+                ),
+            ]
+            for start, end, ratio, label in vectors:
+                self._draw_ratio_vector(
+                    ax, start.date, start.price, end.date, end.price,
+                    ratio, ratio_color, ratio_style, ratio_width, ratio_alpha,
+                    label=label
+                )
+            return
+
         # Vector 1: X → B (AB/XA ratio)
         self._draw_ratio_vector(
             ax, pattern.x.date, pattern.x.price,
@@ -433,7 +476,8 @@ class ChartGenerator:
         color: str,
         style: str,
         width: float,
-        alpha: float
+        alpha: float,
+        label: Optional[str] = None
     ) -> None:
         """Draw a single ratio vector with label."""
         # Draw line
@@ -454,7 +498,7 @@ class ChartGenerator:
         # Add ratio label
         ax.text(
             mid_date, mid_price,
-            f'{ratio:.3f}',
+            label or f'{ratio:.3f}',
             fontsize=9,
             ha='center',
             va='center',
