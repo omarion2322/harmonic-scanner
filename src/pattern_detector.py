@@ -94,6 +94,7 @@ class HarmonicPattern:
     trade_quality: str = "Standard Trade"  # High-Probability Entry, Standard Trade, Standard / Reduced Size, Marginal / Scalp Only
     chart_path: str = ""  # Path to pattern visualization chart
     tp_strategy_used: str = ""  # Which TP strategy was used (e.g., "Scoring Engine", "Fixed", "Fibonacci")
+    origin: Optional[Point] = None  # Unmeasured 0 point that precedes a 5-0 structure
 
     # Multi-swing BC leg metadata
     is_multi_swing_bc: bool = False  # True if BC leg contains multiple internal swings
@@ -206,6 +207,10 @@ class PatternDetector:
             else:
                 rejected_count += 1
 
+        detected_patterns.extend(
+            self._detect_five_zero_patterns(tech, df, fib_tolerance, symbol)
+        )
+
         # Show summary if patterns were rejected
         verbose = self.config_helper.get_bool('VERBOSE_REPORTS', False)
         if rejected_count > 0:
@@ -258,7 +263,8 @@ class PatternDetector:
 
             # Step 5: Calculate pattern grade
             grade = self._calculate_pyharmonics_grade(
-                ratios['ab_xa'], ratios['ad_xa'], ratios['bc_projection'],
+                ratios['ab_xa'], ratios['bc_ab'], ratios['ad_xa'],
+                ratios['bc_projection'],
                 pattern_spec, fib_tolerance,
                 points['x'].price, points['a'].price, points['b'].price,
                 points['c'].price, points['d'].price,
@@ -287,6 +293,102 @@ class PatternDetector:
             raise PatternConversionError(
                 f"Unexpected error converting {py_pattern.name}", ticker=symbol
             ) from e
+
+    def _detect_five_zero_patterns(
+        self,
+        tech: Technicals,
+        df: pd.DataFrame,
+        fib_tolerance: float,
+        symbol: str
+    ) -> List[HarmonicPattern]:
+        """Detect completed 0-X-A-B-C-D structures from alternating swings."""
+        pattern_spec = self.patterns['5_0']
+        detected: List[HarmonicPattern] = []
+
+        for points in self._find_five_zero_candidates(tech, fib_tolerance):
+            is_valid, _ = self._validate_temporal_proportionality(
+                points['x'].date, points['a'].date, points['b'].date,
+                points['c'].date, points['d'].date
+            )
+            if not is_valid:
+                continue
+
+            ratios = self._calculate_five_zero_ratios(points)
+            trading_specs = self._calculate_trading_specifications(
+                points, ratios, pattern_spec, df, symbol
+            )
+            grade = self._calculate_pyharmonics_grade(
+                ratios['ab_xa'], ratios['bc_ab'], ratios['ad_xa'],
+                ratios['bc_projection'], pattern_spec, fib_tolerance,
+                points['x'].price, points['a'].price, points['b'].price,
+                points['c'].price, points['d'].price,
+                points['x'].date, points['a'].date, points['b'].date,
+                points['c'].date, points['d'].date
+            )
+            detected.append(
+                self._create_harmonic_pattern(
+                    points, ratios, pattern_spec, trading_specs, grade,
+                    fib_tolerance
+                )
+            )
+
+        return detected
+
+    def _find_five_zero_candidates(
+        self,
+        tech: Technicals,
+        fib_tolerance: float
+    ) -> List[Dict[str, Any]]:
+        """Return valid 5-0 candidates from six consecutive swing points."""
+        candidates: List[Dict[str, Any]] = []
+        swings = self._collapse_same_type_swings(tech.peak_data)
+        pattern_spec = self.patterns['5_0']
+
+        for start in range(len(swings) - 5):
+            window = swings[start:start + 6]
+            if any(window[i][2] == window[i + 1][2] for i in range(5)):
+                continue
+
+            point_names = ('origin', 'x', 'a', 'b', 'c', 'd')
+            points: Dict[str, Any] = {}
+            for point_index, (name, swing) in enumerate(zip(point_names, window)):
+                data_index, price, swing_type = swing
+                points[name] = Point(
+                    index=point_index - 1,
+                    price=float(price),
+                    date=pd.Timestamp(tech.df.index[data_index]),
+                    swing_type='PEAK' if swing_type == 1 else 'TROUGH'
+                )
+
+            points['is_bullish'] = window[0][2] == 0
+            ratios = self._calculate_five_zero_ratios(points)
+            if self._validate_five_zero_structure(
+                ratios, pattern_spec, fib_tolerance
+            ):
+                candidates.append(points)
+
+        return candidates
+
+    @staticmethod
+    def _collapse_same_type_swings(
+        swings: List[Tuple[int, float, int]]
+    ) -> List[Tuple[int, float, int]]:
+        """Keep the most extreme swing when adjacent points have the same type."""
+        collapsed: List[Tuple[int, float, int]] = []
+        for swing in swings:
+            if not collapsed or collapsed[-1][2] != swing[2]:
+                collapsed.append(swing)
+                continue
+
+            previous = collapsed[-1]
+            is_more_extreme = (
+                swing[1] > previous[1] if swing[2] == 1
+                else swing[1] < previous[1]
+            )
+            if is_more_extreme:
+                collapsed[-1] = swing
+
+        return collapsed
 
     def _extract_pattern_points(self, py_pattern: Any, df: pd.DataFrame) -> Optional[Dict[str, Point]]:
         """
@@ -380,6 +482,46 @@ class PatternDetector:
             'ad_xa': ad_xa
         }
 
+    def _calculate_five_zero_ratios(
+        self,
+        points: Dict[str, Point]
+    ) -> Dict[str, float]:
+        """Calculate the 5-0 ratios from the legs defined by Carney."""
+        xa = abs(points['a'].price - points['x'].price)
+        ab = abs(points['b'].price - points['a'].price)
+        bc = abs(points['c'].price - points['b'].price)
+        cd = abs(points['d'].price - points['c'].price)
+
+        if min(xa, ab, bc) == 0:
+            raise PatternValidationError("5-0 pattern contains a zero-length leg")
+
+        return {
+            'ab_xa': ab / xa,
+            'bc_ab': bc / ab,
+            'bc_projection': cd / bc,
+            'cd_bc': cd / bc,
+            'ad_xa': abs(points['d'].price - points['x'].price) / xa,
+            'cd_ab': cd / ab,
+        }
+
+    def _validate_five_zero_structure(
+        self,
+        ratios: Dict[str, float],
+        pattern_spec: PatternSpec,
+        fib_tolerance: float
+    ) -> bool:
+        """Validate the four defining measurements of a 5-0 pattern."""
+        return (
+            pattern_spec.b_point_min - fib_tolerance
+            <= ratios['ab_xa']
+            <= pattern_spec.b_point_max + fib_tolerance
+            and pattern_spec.c_point_min - fib_tolerance
+            <= ratios['bc_ab']
+            <= pattern_spec.c_point_max + fib_tolerance
+            and abs(ratios['cd_bc'] - 0.50) <= fib_tolerance
+            and abs(ratios['cd_ab'] - 1.0) <= fib_tolerance
+        )
+
     def _get_pattern_specification(self, py_pattern: Any) -> Optional[PatternSpec]:
         """
         Get pattern specification from pyharmonics pattern name.
@@ -400,7 +542,6 @@ class PatternDetector:
             'deep crab': 'deep_crab',
             'cypher': 'cypher',
             'shark': 'shark',
-            'deep shark': '5_0',  # Map deep shark to 5-0 pattern
         }
         pattern_type = pattern_name_map.get(py_pattern.name.lower(), py_pattern.name.lower())
 
@@ -730,6 +871,7 @@ class PatternDetector:
             grade=grade,
             trade_quality=trade_quality,
             tp_strategy_used=trading_specs['tp_strategy_used'],
+            origin=points.get('origin'),
             # Multi-swing BC not detected from pyharmonics
             is_multi_swing_bc=False,
             bc_internal_swing_count=0,
@@ -761,7 +903,8 @@ class PatternDetector:
     #         return "STANDARD"
 
 
-    def _calculate_pyharmonics_grade(self, ab_xa: float, ad_xa: float, bc_projection: float,
+    def _calculate_pyharmonics_grade(self, ab_xa: float, bc_ab: float,
+                                     ad_xa: float, bc_projection: float,
                                      pattern_spec: PatternSpec, fib_tolerance: float,
                                      x_price: float, a_price: float, b_price: float,
                                      c_price: float, d_price: float,
@@ -780,7 +923,8 @@ class PatternDetector:
 
         Args:
             ab_xa: Actual AB/XA ratio (B-point)
-            ad_xa: Actual AD/XA ratio (D-point)
+            bc_ab: Actual BC/AB ratio
+            ad_xa: Actual AD/XA ratio (D-point for standard XABCD patterns)
             bc_projection: Actual CD/BC ratio (BC projection)
             pattern_spec: PatternSpec with ideal ranges
             fib_tolerance: PYHARMONICS_FIB_TOLERANCE value
@@ -799,21 +943,42 @@ class PatternDetector:
             ideal_max=pattern_spec.b_point_max
         )
 
-        d_score = self._score_ratio_precision(
-            actual=ad_xa,
-            ideal_min=pattern_spec.d_point_min,
-            ideal_max=pattern_spec.d_point_max
-        )
-
         bc_score = self._score_ratio_precision(
             actual=bc_projection,
             ideal_min=pattern_spec.bc_projection_min,
             ideal_max=pattern_spec.bc_projection_max
         )
 
-        # Step 2: Calculate weighted base score (D-point dominates)
-        # D=45%, B=35%, BC=20%
-        base_score = (d_score * 0.45) + (b_score * 0.35) + (bc_score * 0.20)
+        if pattern_spec.name == '5-0':
+            c_score = self._score_ratio_precision(
+                actual=bc_ab,
+                ideal_min=pattern_spec.c_point_min,
+                ideal_max=pattern_spec.c_point_max
+            )
+            ab = abs(b_price - a_price)
+            reciprocal_ratio = abs(d_price - c_price) / ab if ab else 0
+            reciprocal_score = self._score_ratio_precision(
+                actual=reciprocal_ratio,
+                ideal_min=1.0,
+                ideal_max=1.0
+            )
+            # Completion is defined jointly by the 50% BC retracement and
+            # reciprocal AB=CD; the setup ratios establish the structure.
+            base_score = (
+                (bc_score * 0.35)
+                + (reciprocal_score * 0.35)
+                + (b_score * 0.15)
+                + (c_score * 0.15)
+            )
+        else:
+            d_score = self._score_ratio_precision(
+                actual=ad_xa,
+                ideal_min=pattern_spec.d_point_min,
+                ideal_max=pattern_spec.d_point_max
+            )
+            # Step 2: Calculate weighted base score (D-point dominates)
+            # D=45%, B=35%, BC=20%
+            base_score = (d_score * 0.45) + (b_score * 0.35) + (bc_score * 0.20)
 
         # Step 3: PRZ Convergence Analysis
         # Check if AB=CD, BC projection, and D-point cluster at same price level
@@ -1300,17 +1465,40 @@ class PatternDetector:
         lines.append(f"  {b_match} B Point: {pattern.ab_xa_ratio:.3f} (Target: {b_target:.3f}, "
                     f"Range: {pattern_spec.b_point_min:.3f}-{pattern_spec.b_point_max:.3f})")
 
-        # BC projection validation
-        bc_target = (pattern_spec.bc_projection_min + pattern_spec.bc_projection_max) / 2
-        bc_match = "✓" if pattern_spec.bc_projection_min <= pattern.bc_projection <= pattern_spec.bc_projection_max else "✗"
-        lines.append(f"  {bc_match} BC Projection: {pattern.bc_projection:.3f} (Target: {bc_target:.3f}, "
-                    f"Range: {pattern_spec.bc_projection_min:.3f}-{pattern_spec.bc_projection_max:.3f})")
+        if pattern.pattern_type == '5-0':
+            c_match = (
+                "✓"
+                if pattern_spec.c_point_min <= pattern.bc_ab_ratio <= pattern_spec.c_point_max
+                else "✗"
+            )
+            lines.append(
+                f"  {c_match} BC/AB Extension: {pattern.bc_ab_ratio:.3f} "
+                f"(Range: {pattern_spec.c_point_min:.3f}-{pattern_spec.c_point_max:.3f})"
+            )
+            d_match = "✓" if abs(pattern.cd_bc_ratio - 0.50) <= 0.03 else "✗"
+            lines.append(
+                f"  {d_match} D Retracement of BC: {pattern.cd_bc_ratio:.3f} "
+                "(Target: 0.500)"
+            )
+            ab = abs(pattern.b.price - pattern.a.price)
+            reciprocal_ratio = abs(pattern.d.price - pattern.c.price) / ab if ab else 0
+            reciprocal_match = "✓" if abs(reciprocal_ratio - 1.0) <= 0.03 else "✗"
+            lines.append(
+                f"  {reciprocal_match} Reciprocal AB=CD: {reciprocal_ratio:.3f} "
+                "(Target: 1.000)"
+            )
+        else:
+            # BC projection validation
+            bc_target = (pattern_spec.bc_projection_min + pattern_spec.bc_projection_max) / 2
+            bc_match = "✓" if pattern_spec.bc_projection_min <= pattern.bc_projection <= pattern_spec.bc_projection_max else "✗"
+            lines.append(f"  {bc_match} BC Projection: {pattern.bc_projection:.3f} (Target: {bc_target:.3f}, "
+                        f"Range: {pattern_spec.bc_projection_min:.3f}-{pattern_spec.bc_projection_max:.3f})")
 
-        # D point validation
-        d_target = (pattern_spec.d_point_min + pattern_spec.d_point_max) / 2
-        d_match = "✓" if pattern_spec.d_point_min <= pattern.ad_xa_ratio <= pattern_spec.d_point_max else "✗"
-        lines.append(f"  {d_match} D Point: {pattern.ad_xa_ratio:.3f} (Target: {d_target:.3f}, "
-                    f"Range: {pattern_spec.d_point_min:.3f}-{pattern_spec.d_point_max:.3f})")
+            # D point validation
+            d_target = (pattern_spec.d_point_min + pattern_spec.d_point_max) / 2
+            d_match = "✓" if pattern_spec.d_point_min <= pattern.ad_xa_ratio <= pattern_spec.d_point_max else "✗"
+            lines.append(f"  {d_match} D Point: {pattern.ad_xa_ratio:.3f} (Target: {d_target:.3f}, "
+                        f"Range: {pattern_spec.d_point_min:.3f}-{pattern_spec.d_point_max:.3f})")
         lines.append("")
 
         # PRZ Analysis

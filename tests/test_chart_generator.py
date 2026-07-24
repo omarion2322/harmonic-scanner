@@ -464,6 +464,59 @@ class TestPlotFibonacciRatios:
         # Should plot ratio vectors
         assert mock_ax.plot.called or mock_ax.text.called
 
+    @patch('chart_generator.plt.subplots')
+    def test_five_zero_ratio_labels_match_official_structure(
+        self, mock_subplots, sample_pattern
+    ):
+        generator = ChartGenerator()
+        mock_fig = MagicMock()
+        mock_ax = MagicMock()
+        mock_subplots.return_value = (mock_fig, mock_ax)
+        sample_pattern.pattern_type = '5-0'
+        sample_pattern.origin = Point(
+            -1, 80.0, pd.Timestamp('2022-12-25'), 'TROUGH'
+        )
+        sample_pattern.x.price = 100.0
+        sample_pattern.a.price = 90.0
+        sample_pattern.b.price = 105.0
+        sample_pattern.c.price = 75.0
+        sample_pattern.d.price = 90.0
+        sample_pattern.ab_xa_ratio = 1.5
+        sample_pattern.bc_ab_ratio = 2.0
+        sample_pattern.cd_bc_ratio = 0.5
+
+        generator._plot_fibonacci_ratios(mock_ax, sample_pattern)
+
+        labels = [call.args[2] for call in mock_ax.text.call_args_list]
+        assert labels == [
+            '1.500 XA',
+            '2.000 AB',
+            '0.500 BC',
+            'AB=CD 1.000',
+        ]
+
+    @patch('chart_generator.plt.subplots')
+    def test_five_zero_overlay_includes_origin_point(
+        self, mock_subplots, sample_pattern
+    ):
+        generator = ChartGenerator()
+        mock_fig = MagicMock()
+        mock_ax = MagicMock()
+        mock_subplots.return_value = (mock_fig, mock_ax)
+        sample_pattern.pattern_type = '5-0'
+        sample_pattern.origin = Point(
+            -1, 95.0, pd.Timestamp('2022-12-25'), 'TROUGH'
+        )
+
+        generator._plot_pattern_overlay(mock_ax, sample_pattern)
+
+        point_labels = [
+            call.args[2]
+            for call in mock_ax.text.call_args_list
+            if call.args[2] in {'0', 'X', 'A', 'B', 'C', 'D'}
+        ]
+        assert point_labels == ['0', 'X', 'A', 'B', 'C', 'D']
+
 
 class TestAddChartLabels:
     """Test _add_chart_labels method."""
