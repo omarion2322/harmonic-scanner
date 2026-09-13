@@ -226,6 +226,20 @@ class TestGenerateSignal:
         assert isinstance(reason, str)
         assert len(reason) > 50
 
+    def test_generate_signal_hold_when_price_left_prz(self, sample_pattern):
+        """Bullish signals must HOLD if price has already left the PRZ."""
+        detector = PatternDetector()
+        sample_pattern.is_bullish = True
+        sample_pattern.entry_price = 101.5
+        sample_pattern.risk_reward = 8.0
+        sample_pattern.stop_loss = 90.0
+        sample_pattern.days_since_completion = 2
+
+        signal, reason = detector.generate_signal(sample_pattern, 110.0, max_days_old=30)
+
+        assert signal == 'HOLD'
+        assert 'prz' in reason.lower()
+
 
 class TestExtractPatternPoints:
     """Test _extract_pattern_points helper method."""

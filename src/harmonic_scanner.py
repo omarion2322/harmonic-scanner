@@ -94,7 +94,9 @@ try:
 except ImportError:
     class config:  # type: ignore
         MAX_STOCKS_TO_SCAN = 50
+        MAX_DAYS_TO_INITIAL_ENTRY = 10
         MAX_DAYS_SINCE_PATTERN = 10
+        MAX_BARS_TO_MONITOR_REACTION = 30
 
 
 class HarmonicScanner:
@@ -114,11 +116,20 @@ class HarmonicScanner:
 
     def __init__(self, asset_type: str = 'stocks') -> None:
         self.detector = PatternDetector()  # Uses Carney's exact specifications
-        self.reaction_detector = ReactionDetector()  # Type 1 and Type 2 reaction detection
-        self.tracker = PatternTracker(storage_dir="./pattern_tracking")  # Pattern state tracking
 
         # Initialize utility helpers
         self.config_helper = ConfigHelper(config)
+        max_reaction_bars = self.config_helper.get_int('MAX_BARS_TO_MONITOR_REACTION', 30)
+        retest_tolerance = (
+            self.config_helper.get_float('TYPE2_RETEST_TOLERANCE_PCT', 2.0) / 100.0
+        )
+        self.reaction_detector = ReactionDetector(
+            max_type2_bars=max_reaction_bars,
+            type2_retest_tolerance=retest_tolerance,
+        )
+        self.tracker = PatternTracker(storage_dir="./pattern_tracking")
+        self.tracker.MAX_REACTION_BARS = max_reaction_bars
+        self.tracker.TYPE2_RETEST_TOLERANCE = retest_tolerance
         self.path_manager = PathManager()
         self.asset_type = asset_type  # 'stocks' or 'crypto' - determines report directory
         self.sector_etf_analyzer = SectorETFAnalyzer()
@@ -253,39 +264,102 @@ class HarmonicScanner:
             # Get current price
             current_price = df['close'].iloc[-1]
 
-            # Evaluate most recent pattern first (before generating chart) may need to change to -1
+            # Evaluate the most recent pattern for a fresh initial entry.
             latest_pattern = patterns[0]
 
-            # Calculate days since pattern completion
-            import pandas as pd
-            from datetime import datetime
-            # Convert both to date objects to avoid timezone issues
+            # Calculate age and reaction state for every completed pattern.
             today = datetime.now().date()
-            pattern_date = latest_pattern.d.date.date() if hasattr(latest_pattern.d.date, 'date') else latest_pattern.d.date
-            days_since = (today - pattern_date).days
-            latest_pattern.days_since_completion = days_since
+            current_idx = len(df) - 1
+            max_reaction_bars = self.config_helper.get_int(
+                'MAX_BARS_TO_MONITOR_REACTION', 30
+            )
+            reaction_records = []
+            for pattern in patterns:
+                pattern_date = (
+                    pattern.d.date.date()
+                    if hasattr(pattern.d.date, 'date')
+                    else pattern.d.date
+                )
+                pattern.days_since_completion = (today - pattern_date).days
+                reaction = self.reaction_detector.detect_reaction(
+                    df, pattern, current_idx
+                )
+                if (
+                    reaction is not None
+                    and reaction.bars_since_completion <= max_reaction_bars
+                ):
+                    reaction_records.append({
+                        'pattern': pattern,
+                        'reaction_data': reaction,
+                    })
 
-            # Use MAX_DAYS_SINCE_PATTERN from config for filtering patterns by completion date
-            # Falls back to default (730 days) if not set
-            max_pattern_age = getattr(config, 'MAX_DAYS_SINCE_PATTERN', None)
+            latest_reaction = next(
+                (
+                    record['reaction_data']
+                    for record in reaction_records
+                    if record['pattern'] is latest_pattern
+                ),
+                None,
+            )
+            type2_confirmations = [
+                self._build_type2_record(record, current_idx)
+                for record in reaction_records
+                if record['reaction_data'].reaction_type == 'TYPE_2'
+            ]
+            type2_candidates = [
+                self._build_type2_record(record, current_idx)
+                for record in reaction_records
+                if record['reaction_data'].reaction_type == 'TYPE_2_CANDIDATE'
+            ]
+
+            max_initial_entry_age = self.config_helper.get_int(
+                'MAX_DAYS_TO_INITIAL_ENTRY',
+                self.config_helper.get_int('MAX_DAYS_SINCE_PATTERN', 730),
+            )
             signal, explanation = self.detector.generate_signal(
                 latest_pattern,
                 current_price,
-                max_days_old=max_pattern_age,
+                max_days_old=max_initial_entry_age,
                 verbose=verbose
             )
 
-            # Only generate chart if signal is BUY or SELL (actionable)
+            signal_pattern = latest_pattern
+            reaction_data = latest_reaction
+            signal_source = 'INITIAL_ENTRY'
+            confirmation_freshness = self.config_helper.get_int(
+                'TYPE2_ENTRY_MAX_BARS_AFTER_CONFIRMATION', 1
+            )
+            actionable_type2 = [
+                record for record in type2_confirmations
+                if record['bars_since_confirmation'] <= confirmation_freshness
+                and not record['stop_hit']
+                and record['risk_pct'] <= self.config_helper.get_float(
+                    'MAX_ALLOWED_STOP_LOSS_PCT', 15.0
+                )
+            ]
+            if actionable_type2:
+                selected = max(
+                    actionable_type2,
+                    key=lambda record: record['confirmation_date'],
+                )
+                signal_pattern = selected['pattern']
+                reaction_data = selected['reaction_data']
+                signal = 'BUY' if signal_pattern.is_bullish else 'SELL'
+                signal_source = 'TYPE_2'
+                explanation = (
+                    f"TYPE 2 confirmed on {selected['confirmation_date'].date()}: "
+                    f"entry ${selected['entry_price']:.2f}, "
+                    f"stop ${selected['stop_loss']:.2f}, "
+                    f"targets ${selected['target_1']:.2f} / "
+                    f"${selected['target_2']:.2f} / ${selected['target_3']:.2f}"
+                )
+
+            # Only generate a chart for an actionable signal.
             chart_path = None
-            reaction_data = None
             sector_etf_analysis = None
             auto_save_charts = self.config_helper.get_bool('AUTO_SAVE_CHARTS', True)
 
             if signal in ['BUY', 'SELL'] and auto_save_charts:
-                # Detect Type 1 and Type 2 reactions for the pattern
-                current_idx = len(df) - 1
-                reaction_data = self.reaction_detector.detect_reaction(df, latest_pattern, current_idx)
-
                 if self.asset_type == 'stocks':
                     try:
                         sector_etf_analysis = self.sector_etf_analyzer.analyze(
@@ -307,12 +381,12 @@ class HarmonicScanner:
                 # Generate pattern chart
                 try:
                     chart_path = self.detector.generate_pattern_chart(
-                        latest_pattern, ticker, df, chart_dir,
+                        signal_pattern, ticker, df, chart_dir,
                         interval=data_interval,
                         reaction_data=reaction_data,
                         sector_etf_analysis=sector_etf_analysis
                     )
-                    latest_pattern.chart_path = chart_path
+                    signal_pattern.chart_path = chart_path
                 except (OSError, IOError) as e:
                     logger.warning("Could not save chart for %s: %s", ticker, e)
                     chart_path = None
@@ -331,6 +405,10 @@ class HarmonicScanner:
                 'current_price': current_price,
                 'chart_path': chart_path,
                 'reaction_data': reaction_data,
+                'signal_pattern': signal_pattern,
+                'signal_source': signal_source,
+                'type2_confirmations': type2_confirmations,
+                'type2_candidates': type2_candidates,
                 'sector_etf_analysis': sector_etf_analysis,
                 '_df': df  # Include DataFrame for pattern tracker (avoid re-download)
             }
@@ -355,6 +433,44 @@ class HarmonicScanner:
                 'patterns': [],
                 'chart_path': None
             }
+
+    @staticmethod
+    def _build_type2_record(
+        reaction_record: Dict[str, Any],
+        current_idx: int,
+    ) -> Dict[str, Any]:
+        """Build a reportable Type 2 candidate or confirmation."""
+        pattern = reaction_record['pattern']
+        reaction = reaction_record['reaction_data']
+        confirmation_idx = reaction.type2_terminal_bar_idx
+        bars_since_confirmation = (
+            current_idx - confirmation_idx
+            if confirmation_idx is not None
+            else None
+        )
+        risk_pct = (
+            abs(reaction.type2_entry_price - reaction.type2_stop_loss)
+            / reaction.type2_entry_price
+            * 100
+            if reaction.type2_entry_price and reaction.type2_stop_loss
+            else float('inf')
+        )
+        return {
+            'pattern': pattern,
+            'reaction_data': reaction,
+            'ticker': getattr(pattern, 'ticker', None),
+            'retest_date': reaction.type2_retest_date,
+            'confirmation_date': reaction.type2_terminal_bar_date,
+            'bars_since_confirmation': bars_since_confirmation,
+            'entry_price': reaction.type2_entry_price,
+            'stop_loss': reaction.type2_stop_loss,
+            'target_1': reaction.type2_target_1,
+            'target_2': reaction.type2_target_2,
+            'target_3': reaction.type2_target_3,
+            'forward_return_pct': reaction.type2_forward_return_pct,
+            'stop_hit': reaction.type2_stop_hit,
+            'risk_pct': risk_pct,
+        }
 
     def run_scan(self, max_stocks: Optional[int] = None) -> Dict[str, List[Dict[str, Any]]]:
         """
@@ -664,6 +780,18 @@ class HarmonicScanner:
         report_lines.append(f"BUY Signals: {len(results['BUY'])}")
         report_lines.append(f"SELL Signals: {len(results['SELL'])}")
         report_lines.append(f"HOLD Signals: {len(results['HOLD'])}")
+        type2_confirmed_count = sum(
+            len(analysis.get('type2_confirmations', []))
+            for signal in ('BUY', 'SELL', 'HOLD')
+            for analysis in results[signal]
+        )
+        type2_candidate_count = sum(
+            len(analysis.get('type2_candidates', []))
+            for signal in ('BUY', 'SELL', 'HOLD')
+            for analysis in results[signal]
+        )
+        report_lines.append(f"Type 2 Confirmed: {type2_confirmed_count}")
+        report_lines.append(f"Type 2 Candidates: {type2_candidate_count}")
 
         # Add tracker stats if available
         tracked_stats_value: Any = results.get('_tracked_stats', {})
@@ -676,21 +804,27 @@ class HarmonicScanner:
 
         report_lines.append("")
 
+        self._append_type2_sections(report_lines, results)
+
         # BUY signals
-        if results['BUY']:
+        direct_buy_signals = [
+            analysis for analysis in results['BUY']
+            if analysis.get('signal_source') != 'TYPE_2'
+        ]
+        if direct_buy_signals:
             report_lines.append("="*80)
             report_lines.append("BUY SIGNALS")
             report_lines.append("="*80)
             report_lines.append("")
 
-            for analysis in results['BUY']:
+            for analysis in direct_buy_signals:
                 report_lines.append(f"Ticker: {analysis['ticker']}")
                 report_lines.append(f"Current Price: ${analysis.get('current_price', 0):.2f}")
                 report_lines.append(f"Analysis: {analysis['reason']}")
 
                 if analysis['patterns']:
                     # Use patterns[0] - the pattern that was analyzed for the signal (not patterns[-1])
-                    pattern = analysis['patterns'][0]
+                    pattern = analysis.get('signal_pattern', analysis['patterns'][0])
                     report_lines.append("")
                     report_lines.append(f"  Pattern: {pattern.pattern_type.upper()} ({'BULLISH' if pattern.is_bullish else 'BEARISH'})")
                     report_lines.append(f"  Grade: {pattern.grade} | Tolerance: {pattern.tolerance_level}")
@@ -729,20 +863,24 @@ class HarmonicScanner:
                 report_lines.append("")
 
         # SELL signals
-        if results['SELL']:
+        direct_sell_signals = [
+            analysis for analysis in results['SELL']
+            if analysis.get('signal_source') != 'TYPE_2'
+        ]
+        if direct_sell_signals:
             report_lines.append("="*80)
             report_lines.append("SELL SIGNALS")
             report_lines.append("="*80)
             report_lines.append("")
 
-            for analysis in results['SELL']:
+            for analysis in direct_sell_signals:
                 report_lines.append(f"Ticker: {analysis['ticker']}")
                 report_lines.append(f"Current Price: ${analysis.get('current_price', 0):.2f}")
                 report_lines.append(f"Analysis: {analysis['reason']}")
 
                 if analysis['patterns']:
                     # Use patterns[0] - the pattern that was analyzed for the signal (not patterns[-1])
-                    pattern = analysis['patterns'][0]
+                    pattern = analysis.get('signal_pattern', analysis['patterns'][0])
                     report_lines.append("")
                     report_lines.append(f"  Pattern: {pattern.pattern_type.upper()} ({'BULLISH' if pattern.is_bullish else 'BEARISH'})")
                     report_lines.append(f"  Grade: {pattern.grade} | Tolerance: {pattern.tolerance_level}")
@@ -874,6 +1012,97 @@ class HarmonicScanner:
         report_lines.append("="*80)
 
         return "\n".join(report_lines)
+
+    @staticmethod
+    def _append_type2_sections(
+        report_lines: List[str],
+        results: Dict[str, List[Dict[str, Any]]],
+    ) -> None:
+        """Append Type 2 confirmations and candidates outside ordinary HOLDs."""
+        analyses = [
+            analysis
+            for signal in ('BUY', 'SELL', 'HOLD')
+            for analysis in results[signal]
+        ]
+        confirmed = [
+            (analysis, record)
+            for analysis in analyses
+            for record in analysis.get('type2_confirmations', [])
+        ]
+        candidates = [
+            (analysis, record)
+            for analysis in analyses
+            for record in analysis.get('type2_candidates', [])
+        ]
+
+        if confirmed:
+            report_lines.append("=" * 80)
+            report_lines.append(f"TYPE 2 CONFIRMED ({len(confirmed)})")
+            report_lines.append("=" * 80)
+            report_lines.append("")
+            for analysis, record in confirmed:
+                pattern = record['pattern']
+                actionable = (
+                    analysis.get('signal_source') == 'TYPE_2'
+                    and analysis.get('signal_pattern') is pattern
+                )
+                if actionable:
+                    status = 'ACTIONABLE'
+                elif record['stop_hit']:
+                    status = 'STOPPED'
+                elif record['bars_since_confirmation'] is not None:
+                    status = 'MONITORING'
+                else:
+                    status = 'NOT ACTIONABLE'
+                report_lines.append(f"Ticker: {analysis['ticker']}")
+                report_lines.append(
+                    f"Pattern: {pattern.pattern_type.upper()} "
+                    f"({'BULLISH' if pattern.is_bullish else 'BEARISH'})"
+                )
+                report_lines.append(
+                    f"Retest Date: {record['retest_date'].date()}"
+                )
+                report_lines.append(
+                    f"Confirmation Date: {record['confirmation_date'].date()}"
+                )
+                report_lines.append(f"Status: {status}")
+                report_lines.append(
+                    f"New Entry: ${record['entry_price']:.2f} | "
+                    f"New Stop: ${record['stop_loss']:.2f} "
+                    f"({record['risk_pct']:.1f}% risk)"
+                )
+                report_lines.append(
+                    f"1R / 2R / 3R: ${record['target_1']:.2f} / "
+                    f"${record['target_2']:.2f} / ${record['target_3']:.2f}"
+                )
+                if record['forward_return_pct'] is not None:
+                    report_lines.append(
+                        f"Forward Return: {record['forward_return_pct']:+.2f}%"
+                    )
+                if record['stop_hit']:
+                    report_lines.append("Warning: Retest-derived stop has been hit")
+                report_lines.append("-" * 80)
+                report_lines.append("")
+
+        if candidates:
+            report_lines.append("=" * 80)
+            report_lines.append(f"TYPE 2 CANDIDATES ({len(candidates)})")
+            report_lines.append("=" * 80)
+            report_lines.append(
+                "Initial reaction and PRZ retest detected; waiting for a second reversal."
+            )
+            report_lines.append("")
+            for analysis, record in candidates:
+                pattern = record['pattern']
+                report_lines.append(f"Ticker: {analysis['ticker']}")
+                report_lines.append(
+                    f"Pattern: {pattern.pattern_type.upper()} "
+                    f"({'BULLISH' if pattern.is_bullish else 'BEARISH'})"
+                )
+                report_lines.append(f"Retest Date: {record['retest_date'].date()}")
+                report_lines.append("Status: NOT ACTIONABLE")
+                report_lines.append("-" * 80)
+                report_lines.append("")
 
     @staticmethod
     def _append_sector_etf_report(

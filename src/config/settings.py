@@ -20,7 +20,10 @@ class TimeframeConfig(BaseModel):
     model_config = SettingsConfigDict(frozen=True)
 
     swing_window: int = Field(4, ge=2, le=10, description="Swing point detection window")
-    max_days_since_pattern: int = Field(7, ge=1, le=120, description="Max days since pattern completion")
+    max_days_since_pattern: int = Field(7, ge=1, le=365, description="Max days allowed for the initial entry")
+    max_bars_to_monitor_reaction: int = Field(
+        30, ge=3, le=120, description="Bars to monitor for an ordered Type 2 reaction"
+    )
     data_period: str = Field("5y", description="Historical data period")
     min_allowed_stop_loss_pct: float = Field(8.0, ge=1.0, le=30.0, description="Min stop loss percentage")
     max_allowed_stop_loss_pct: float = Field(15.0, ge=1.0, le=50.0, description="Max stop loss percentage")
@@ -62,10 +65,10 @@ class HarmonicTradingConfig(BaseSettings):
 
     # ==================== PATTERN DETECTION ====================
     pyharmonics_fib_tolerance: float = Field(
-        0.03,
-        ge=0.01,
-        le=0.1,
-        description="Fibonacci tolerance for pyharmonics"
+        0.01,
+        ge=0.001,
+        le=0.05,
+        description="Fibonacci tolerance used only by the pyharmonics library for candidate discovery; Carney pattern ranges remain authoritative"
     )
 
     # ==================== PATTERN DURATION FILTERS ====================
@@ -102,6 +105,12 @@ class HarmonicTradingConfig(BaseSettings):
     max_download_retries: int = Field(3, ge=1, le=10)
 
     # ==================== CONFIRMATION SETTINGS ====================
+    require_price_in_prz: bool = Field(
+        True,
+        description="HOLD if current price has already left the PRZ"
+    )
+    type2_retest_tolerance_pct: float = Field(2.0, ge=0.1, le=10.0)
+    type2_entry_max_bars_after_confirmation: int = Field(1, ge=0, le=10)
     require_rsi_confirmation: bool = Field(False)
     rsi_oversold: int = Field(30, ge=0, le=100)
     rsi_overbought: int = Field(70, ge=0, le=100)

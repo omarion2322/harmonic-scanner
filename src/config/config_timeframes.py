@@ -19,6 +19,7 @@ Based on practical trading considerations:
 DAILY_CONFIG = {
     'SWING_WINDOW': 4,
     'MAX_DAYS_SINCE_PATTERN': 7,
+    'MAX_BARS_TO_MONITOR_REACTION': 30,
     'DATA_PERIOD': '4y',
     'MIN_ALLOWED_STOP_LOSS_PCT': 8.0,
     'MAX_ALLOWED_STOP_LOSS_PCT': 15.0,
@@ -34,6 +35,7 @@ DAILY_CONFIG = {
 THREE_DAY_CONFIG = {
     'SWING_WINDOW': 4,
     'MAX_DAYS_SINCE_PATTERN': 20,
+    'MAX_BARS_TO_MONITOR_REACTION': 30,
     'DATA_PERIOD': '3y',
     'MIN_ALLOWED_STOP_LOSS_PCT': 2.5,
     'MAX_ALLOWED_STOP_LOSS_PCT': 7.0,
@@ -48,7 +50,8 @@ THREE_DAY_CONFIG = {
 # ============================================================================
 WEEKLY_CONFIG = {
     'SWING_WINDOW': 4,
-    'MAX_DAYS_SINCE_PATTERN': 14,
+    'MAX_DAYS_SINCE_PATTERN': 140,
+    'MAX_BARS_TO_MONITOR_REACTION': 120,
     'DATA_PERIOD': '5y',
     'MIN_ALLOWED_STOP_LOSS_PCT': 8.0,
     'MAX_ALLOWED_STOP_LOSS_PCT': 15.0,
@@ -64,6 +67,7 @@ WEEKLY_CONFIG = {
 MONTHLY_CONFIG = {
     'SWING_WINDOW': 3,
     'MAX_DAYS_SINCE_PATTERN': 60,
+    'MAX_BARS_TO_MONITOR_REACTION': 30,
     'DATA_PERIOD': 'max',
     'MIN_ALLOWED_STOP_LOSS_PCT': 8.0,
     'MAX_ALLOWED_STOP_LOSS_PCT': 15.0,
@@ -119,7 +123,8 @@ def print_timeframe_config(interval: str):
     print()
     print("PATTERN DETECTION:")
     print(f"  Swing Window:           {cfg['SWING_WINDOW']}")
-    print(f"  Max Days Since Pattern: {cfg['MAX_DAYS_SINCE_PATTERN']} days")
+    print(f"  Max Days To Initial Entry: {cfg['MAX_DAYS_SINCE_PATTERN']} days")
+    print(f"  Max Bars To Monitor Reaction: {cfg['MAX_BARS_TO_MONITOR_REACTION']} bars")
     print()
     print("DATA SETTINGS:")
     print(f"  Lookback Period:       {cfg['DATA_PERIOD']}")

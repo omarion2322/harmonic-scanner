@@ -504,6 +504,16 @@ class PatternDetector:
             'cd_ab': cd / ab,
         }
 
+    @staticmethod
+    def _get_pattern_validation_tolerance(_fib_tolerance: float) -> float:
+        """Return tolerance used for Carney pattern validation.
+
+        pyharmonics' fib_tolerance is only for library-side candidate discovery.
+        Carney's pattern definitions are authoritative, so validation must not be
+        widened by the pyharmonics setting.
+        """
+        return 0.0
+
     def _validate_five_zero_structure(
         self,
         ratios: Dict[str, float],
@@ -511,15 +521,16 @@ class PatternDetector:
         fib_tolerance: float
     ) -> bool:
         """Validate the four defining measurements of a 5-0 pattern."""
+        validation_tolerance = self._get_pattern_validation_tolerance(fib_tolerance)
         return (
-            pattern_spec.b_point_min - fib_tolerance
+            pattern_spec.b_point_min - validation_tolerance
             <= ratios['ab_xa']
-            <= pattern_spec.b_point_max + fib_tolerance
-            and pattern_spec.c_point_min - fib_tolerance
+            <= pattern_spec.b_point_max + validation_tolerance
+            and pattern_spec.c_point_min - validation_tolerance
             <= ratios['bc_ab']
-            <= pattern_spec.c_point_max + fib_tolerance
-            and abs(ratios['cd_bc'] - 0.50) <= fib_tolerance
-            and abs(ratios['cd_ab'] - 1.0) <= fib_tolerance
+            <= pattern_spec.c_point_max + validation_tolerance
+            and abs(ratios['cd_bc'] - 0.50) <= validation_tolerance
+            and abs(ratios['cd_ab'] - 1.0) <= validation_tolerance
         )
 
     def _get_pattern_specification(self, py_pattern: Any) -> Optional[PatternSpec]:
@@ -1275,7 +1286,8 @@ class PatternDetector:
         Args:
             pattern: Detected harmonic pattern
             current_price: Current stock price
-            max_days_old: Maximum age of pattern to consider (days). If None, uses MAX_DAYS_SINCE_PATTERN from config
+            max_days_old: Maximum age for the initial entry. If None, uses
+                MAX_DAYS_TO_INITIAL_ENTRY from config.
             verbose: If True, generate detailed asset-specific explanation
 
         Returns:
@@ -1285,7 +1297,10 @@ class PatternDetector:
         if max_days_old is None:
             try:
                 import config
-                max_days_old = self.config_helper.get_int('MAX_DAYS_SINCE_PATTERN', 730)
+                max_days_old = self.config_helper.get_int(
+                    'MAX_DAYS_TO_INITIAL_ENTRY',
+                    self.config_helper.get_int('MAX_DAYS_SINCE_PATTERN', 730),
+                )
             except ImportError:
                 max_days_old = 730  # Default to 2 years if config not available
 
@@ -1325,9 +1340,10 @@ class PatternDetector:
         if risk_pct_rounded > max_risk_pct:
             return "HOLD", f"Risk too high ({risk_pct:.1f}%, maximum {max_risk_pct:.1f}%) - pattern detected on {pattern.d.date.date()}"
 
-        # PRZ tolerance based on pattern type
-        # Extension patterns allow more volatility
-        prz_tolerance = 0.03 if pattern.pattern_type in ['Butterfly', 'Crab', 'Deep Crab'] else 0.02
+        # PRZ tolerance: 5% matches live execution (wick or pay up to 5%).
+        # Wider than Carney's tight PRZ; audit showed exact-D wick fills underperformed
+        # opens still inside 5%. Extension patterns keep the same band.
+        prz_tolerance = self.config_helper.get_float('PRZ_ENTRY_TOLERANCE_PCT', 5.0) / 100.0
 
         # Check if current price is still within PRZ
         in_prz = False
@@ -1338,11 +1354,12 @@ class PatternDetector:
             # Bearish: price should be at or above entry (at D or higher)
             in_prz = current_price >= pattern.entry_price * (1 - prz_tolerance)
 
-        # if not in_prz:
-        #     return "HOLD", (
-        #         f"{pattern.pattern_type} pattern detected on {pattern.d.date.date()} but price moved outside PRZ "
-        #         f"(Current: ${current_price:.2f}, Entry: ${pattern.entry_price:.2f})"
-        #     )
+        require_prz = self.config_helper.get_bool('REQUIRE_PRICE_IN_PRZ', True)
+        if require_prz and not in_prz:
+            return "HOLD", (
+                f"{pattern.pattern_type} pattern detected on {pattern.d.date.date()} but price moved outside PRZ "
+                f"(Current: ${current_price:.2f}, Entry: ${pattern.entry_price:.2f})"
+            )
 
         # Check if stop loss hit
         # Get pattern spec for detailed stop loss information

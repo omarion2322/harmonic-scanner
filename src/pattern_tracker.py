@@ -18,6 +18,7 @@ from typing import Dict, List, Optional, Tuple, Any
 from enum import Enum
 from pydantic import BaseModel, Field, field_validator
 from logging_config import get_logger
+from reaction_detector import detect_ordered_type2
 
 logger = get_logger(__name__)
 
@@ -28,6 +29,7 @@ class PatternStatus(Enum):
     COMPLETED = "completed"          # 100% complete, at D-point
     AWAITING_CONFIRMATION = "awaiting_confirmation"  # Completed, waiting for reaction
     CONFIRMED_TYPE1 = "confirmed_type1"  # Type 1 reaction detected
+    TYPE2_CANDIDATE = "type2_candidate"  # Retested PRZ, awaiting second reversal
     CONFIRMED_TYPE2 = "confirmed_type2"  # Type 2 reaction detected
     INVALIDATED = "invalidated"      # D-point extended beyond tolerance
     STOPPED_OUT = "stopped_out"      # Stop loss hit
@@ -39,6 +41,7 @@ class ReactionType(Enum):
     """Price reaction types at PRZ"""
     NONE = "none"
     TYPE_1 = "type_1"  # Quick reversal, reached 38.2% or 61.8% of CD
+    TYPE_2_CANDIDATE = "type_2_candidate"  # Retest found, awaiting confirmation
     TYPE_2 = "type_2"  # Retest of PRZ after initial bounce
     FAILED = "failed"  # Broke through PRZ without reversal
 
@@ -98,6 +101,20 @@ class PatternSnapshot(BaseModel):
     max_favorable_move: float = Field(0.0, ge=0, description="Max favorable move from D")
     max_adverse_move: float = Field(0.0, ge=0, description="Max adverse move from D")
     targets_hit: List[int] = Field(default_factory=list, description="Targets hit (1, 2, 3)")
+    type1_date: str = Field("", description="First date the Type 1 threshold was reached")
+    type2_retest_date: str = Field("", description="Date price retested the PRZ")
+    type2_confirmation_date: str = Field("", description="Date the second reversal confirmed")
+    type2_entry_price: Optional[float] = Field(None, gt=0, description="Type 2 confirmation entry")
+    type2_stop_loss: Optional[float] = Field(None, gt=0, description="Stop derived from the retest")
+    type2_target_1: Optional[float] = Field(None, gt=0, description="Type 2 1R target")
+    type2_target_2: Optional[float] = Field(None, gt=0, description="Type 2 2R target")
+    type2_target_3: Optional[float] = Field(None, gt=0, description="Type 2 3R target")
+    type2_forward_return_pct: Optional[float] = Field(
+        None, description="Return from Type 2 entry to latest close"
+    )
+    type2_stop_hit: bool = Field(False, description="Whether the Type 2 stop was hit")
+    type2_max_favorable_move: Optional[float] = Field(None, ge=0)
+    type2_max_adverse_move: Optional[float] = Field(None, ge=0)
 
     @field_validator('targets_hit')
     @classmethod
@@ -123,7 +140,19 @@ class PatternSnapshot(BaseModel):
             'd_point_range_min': 0.0,
             'd_point_range_max': 0.0,
             'd_price_history': [],
-            'targets_hit': []
+            'targets_hit': [],
+            'type1_date': '',
+            'type2_retest_date': '',
+            'type2_confirmation_date': '',
+            'type2_entry_price': None,
+            'type2_stop_loss': None,
+            'type2_target_1': None,
+            'type2_target_2': None,
+            'type2_target_3': None,
+            'type2_forward_return_pct': None,
+            'type2_stop_hit': False,
+            'type2_max_favorable_move': None,
+            'type2_max_adverse_move': None,
         }
 
         # Merge defaults with data (data takes precedence)
@@ -155,6 +184,7 @@ class PatternTracker:
         # Configuration
         self.D_EXTENSION_TOLERANCE = 0.05  # 5% - D-point can move this much
         self.MAX_PATTERN_AGE_DAYS = 30     # Expire patterns after 30 days
+        self.MAX_REACTION_BARS = 30        # Monitor completed patterns for Type 2
         self.TYPE1_RETRACE_MIN = 0.382     # Type 1 needs 38.2% retrace of CD
         self.TYPE2_RETEST_TOLERANCE = 0.02 # 2% tolerance for PRZ retest
 
@@ -356,6 +386,7 @@ class PatternTracker:
         }
 
         current_timestamp = current_date.isoformat()
+        processed_pattern_ids = set()
 
         # Process each detected pattern
         for pattern in detected_patterns:
@@ -367,6 +398,7 @@ class PatternTracker:
                 c_date=pattern.c.date.isoformat(),
                 pattern_type=pattern.pattern_type
             )
+            processed_pattern_ids.add(pattern_id)
 
             # Check if this is an existing pattern
             if pattern_id in self.active_patterns:
@@ -388,7 +420,8 @@ class PatternTracker:
                                     PatternStatus.CONFIRMED_TYPE2.value]:
                 results['confirmed'].append(snapshot)
             elif snapshot.status in [PatternStatus.COMPLETED.value,
-                                    PatternStatus.AWAITING_CONFIRMATION.value]:
+                                    PatternStatus.AWAITING_CONFIRMATION.value,
+                                    PatternStatus.TYPE2_CANDIDATE.value]:
                 results['monitoring'].append(snapshot)
             elif snapshot.status == PatternStatus.INVALIDATED.value:
                 results['invalidated'].append(snapshot)
@@ -397,6 +430,41 @@ class PatternTracker:
             elif snapshot.status in [PatternStatus.TARGET_HIT.value,
                                     PatternStatus.STOPPED_OUT.value,
                                     PatternStatus.EXPIRED.value]:
+                results['completed'].append(snapshot)
+                self._archive_pattern(snapshot)
+                del self.active_patterns[pattern_id]
+
+        # Continue monitoring completed patterns even if the detector no longer
+        # returns them in the current scan.
+        for pattern_id, snapshot in list(self.active_patterns.items()):
+            if snapshot.ticker != ticker or pattern_id in processed_pattern_ids:
+                continue
+            if snapshot.status not in {
+                PatternStatus.COMPLETED.value,
+                PatternStatus.AWAITING_CONFIRMATION.value,
+                PatternStatus.CONFIRMED_TYPE1.value,
+                PatternStatus.TYPE2_CANDIDATE.value,
+                PatternStatus.CONFIRMED_TYPE2.value,
+            }:
+                continue
+
+            self._analyze_reaction(snapshot, price_data)
+            if snapshot.status in {
+                PatternStatus.CONFIRMED_TYPE1.value,
+                PatternStatus.CONFIRMED_TYPE2.value,
+            }:
+                results['confirmed'].append(snapshot)
+            elif snapshot.status in {
+                PatternStatus.COMPLETED.value,
+                PatternStatus.AWAITING_CONFIRMATION.value,
+                PatternStatus.TYPE2_CANDIDATE.value,
+            }:
+                results['monitoring'].append(snapshot)
+            elif snapshot.status in {
+                PatternStatus.TARGET_HIT.value,
+                PatternStatus.STOPPED_OUT.value,
+                PatternStatus.EXPIRED.value,
+            }:
                 results['completed'].append(snapshot)
                 self._archive_pattern(snapshot)
                 del self.active_patterns[pattern_id]
@@ -464,7 +532,19 @@ class PatternTracker:
             d_extended=False,
             max_favorable_move=0.0,
             max_adverse_move=0.0,
-            targets_hit=[]
+            targets_hit=[],
+            type1_date="",
+            type2_retest_date="",
+            type2_confirmation_date="",
+            type2_entry_price=None,
+            type2_stop_loss=None,
+            type2_target_1=None,
+            type2_target_2=None,
+            type2_target_3=None,
+            type2_forward_return_pct=None,
+            type2_stop_hit=False,
+            type2_max_favorable_move=None,
+            type2_max_adverse_move=None,
         )
 
         # Analyze initial reaction (only if completed)
@@ -542,8 +622,13 @@ class PatternTracker:
             # If entry is locked, preserve the original PRZ zone
 
             # Re-analyze reaction with updated data
-            if snapshot.status in [PatternStatus.COMPLETED.value,
-                                  PatternStatus.AWAITING_CONFIRMATION.value]:
+            if snapshot.status in [
+                PatternStatus.COMPLETED.value,
+                PatternStatus.AWAITING_CONFIRMATION.value,
+                PatternStatus.CONFIRMED_TYPE1.value,
+                PatternStatus.TYPE2_CANDIDATE.value,
+                PatternStatus.CONFIRMED_TYPE2.value,
+            ]:
                 self._analyze_reaction(snapshot, price_data)
 
         return snapshot
@@ -588,16 +673,71 @@ class PatternTracker:
             snapshot.max_favorable_move = max(0.0, max_favorable)
             snapshot.max_adverse_move = max(0.0, max_adverse)
 
+            cd_range = abs(snapshot.d_price - snapshot.c_price)
+            type1_threshold = cd_range * self.TYPE1_RETRACE_MIN
+            if max_favorable >= type1_threshold:
+                if snapshot.is_bullish:
+                    crossed = after_d[high_col] >= snapshot.d_price + type1_threshold
+                else:
+                    crossed = after_d[low_col] <= snapshot.d_price - type1_threshold
+                if not snapshot.type1_date and crossed.any():
+                    snapshot.type1_date = pd.Timestamp(
+                        crossed[crossed].index[0]
+                    ).isoformat()
+                if snapshot.reaction_type != ReactionType.TYPE_2.value:
+                    snapshot.reaction_type = ReactionType.TYPE_1.value
+
+            # Detect the ordered Type 2 sequence before assigning the final state.
+            terminal_matches = price_data.index.get_indexer([d_date], method='nearest')
+            terminal_bar_idx = int(terminal_matches[0])
+            type2 = detect_ordered_type2(
+                price_data,
+                terminal_bar_idx=terminal_bar_idx,
+                is_bullish=snapshot.is_bullish,
+                d_price=snapshot.d_price,
+                c_price=snapshot.c_price,
+                stop_loss=snapshot.stop_loss,
+                max_bars=self.MAX_REACTION_BARS,
+                retest_tolerance=self.TYPE2_RETEST_TOLERANCE,
+                type1_retrace_min=self.TYPE1_RETRACE_MIN,
+            )
+
+            if type2.get('candidate'):
+                snapshot.type2_retest_date = pd.Timestamp(type2['retest_date']).isoformat()
+
+            if type2.get('detected'):
+                snapshot.reaction_type = ReactionType.TYPE_2.value
+                snapshot.type2_confirmation_date = pd.Timestamp(
+                    type2['confirmation_date']
+                ).isoformat()
+                snapshot.type2_entry_price = type2['entry_price']
+                snapshot.type2_stop_loss = type2['stop_loss']
+                snapshot.type2_target_1 = type2['target_1']
+                snapshot.type2_target_2 = type2['target_2']
+                snapshot.type2_target_3 = type2['target_3']
+                snapshot.type2_forward_return_pct = type2['forward_return_pct']
+                snapshot.type2_stop_hit = type2['stop_hit']
+                snapshot.type2_max_favorable_move = type2['max_favorable_move']
+                snapshot.type2_max_adverse_move = type2['max_adverse_move']
+
             # Check for stop loss hit
             if snapshot.is_bullish:
                 if after_d[low_col].min() <= snapshot.stop_loss:
                     snapshot.status = PatternStatus.STOPPED_OUT.value
-                    snapshot.reaction_type = ReactionType.FAILED.value
+                    if snapshot.reaction_type not in [
+                        ReactionType.TYPE_1.value,
+                        ReactionType.TYPE_2.value,
+                    ]:
+                        snapshot.reaction_type = ReactionType.FAILED.value
                     return
             else:
                 if after_d[high_col].max() >= snapshot.stop_loss:
                     snapshot.status = PatternStatus.STOPPED_OUT.value
-                    snapshot.reaction_type = ReactionType.FAILED.value
+                    if snapshot.reaction_type not in [
+                        ReactionType.TYPE_1.value,
+                        ReactionType.TYPE_2.value,
+                    ]:
+                        snapshot.reaction_type = ReactionType.FAILED.value
                     return
 
             # Check for targets hit
@@ -623,43 +763,24 @@ class PatternTracker:
                 snapshot.status = PatternStatus.TARGET_HIT.value
                 return
 
-            # Check for Type 1 reaction (quick reversal, reached 38.2% of CD)
-            cd_range = abs(snapshot.d_price - snapshot.c_price)
-            type1_threshold = cd_range * self.TYPE1_RETRACE_MIN
+            if type2.get('detected'):
+                snapshot.status = PatternStatus.CONFIRMED_TYPE2.value
+                logger.info("Type 2 Reaction detected for %s: ordered retest and reversal", snapshot.pattern_id)
+                return
 
-            if max_favorable >= type1_threshold:
-                snapshot.reaction_type = ReactionType.TYPE_1.value
+            if type2.get('candidate'):
+                snapshot.reaction_type = ReactionType.TYPE_2_CANDIDATE.value
+                snapshot.status = PatternStatus.TYPE2_CANDIDATE.value
+                return
+
+            if snapshot.reaction_type == ReactionType.TYPE_1.value:
                 snapshot.status = PatternStatus.CONFIRMED_TYPE1.value
                 logger.info("Type 1 Reaction detected for %s: %.2f move from D", snapshot.pattern_id, max_favorable)
                 return
 
-            # Check for Type 2 reaction (retest of PRZ)
-            # Type 2: initial bounce, then retest D-point, then reversal
-            prz_tolerance = snapshot.d_price * self.TYPE2_RETEST_TOLERANCE
-
-            # Look for pattern: move away from D, return to D zone, then reverse
-            if len(after_d) >= 3:
-                # Check if price moved away then came back to D zone
-                if snapshot.is_bullish:
-                    moved_up = (after_d[high_col] - snapshot.d_price).max() > type1_threshold * 0.5
-                    came_back = any(abs(after_d[low_col] - snapshot.d_price) <= prz_tolerance)
-                    reversed_again = favorable_moves.iloc[-3:].max() > type1_threshold * 0.5
-
-                    if moved_up and came_back and reversed_again:
-                        snapshot.reaction_type = ReactionType.TYPE_2.value
-                        snapshot.status = PatternStatus.CONFIRMED_TYPE2.value
-                        logger.info("Type 2 Reaction detected for %s: retest and reversal", snapshot.pattern_id)
-                        return
-                else:
-                    moved_down = (snapshot.d_price - after_d[low_col]).max() > type1_threshold * 0.5
-                    came_back = any(abs(after_d[high_col] - snapshot.d_price) <= prz_tolerance)
-                    reversed_again = favorable_moves.iloc[-3:].max() > type1_threshold * 0.5
-
-                    if moved_down and came_back and reversed_again:
-                        snapshot.reaction_type = ReactionType.TYPE_2.value
-                        snapshot.status = PatternStatus.CONFIRMED_TYPE2.value
-                        logger.info("Type 2 Reaction detected for %s: retest and reversal", snapshot.pattern_id)
-                        return
+            if len(after_d) > self.MAX_REACTION_BARS:
+                snapshot.status = PatternStatus.EXPIRED.value
+                return
 
             # No clear reaction yet
             snapshot.status = PatternStatus.AWAITING_CONFIRMATION.value
@@ -681,7 +802,10 @@ class PatternTracker:
             first_detected = datetime.fromisoformat(snapshot.first_detected)
             days_old = (current_date - first_detected).days
 
-            if days_old > self.MAX_PATTERN_AGE_DAYS:
+            expirable_statuses = {
+                PatternStatus.FORMING.value,
+            }
+            if days_old > self.MAX_PATTERN_AGE_DAYS and snapshot.status in expirable_statuses:
                 snapshot.status = PatternStatus.EXPIRED.value
                 results['completed'].append(snapshot)
                 self._archive_pattern(snapshot)
@@ -738,7 +862,10 @@ class PatternTracker:
             # Special counts
             if status in [PatternStatus.CONFIRMED_TYPE1.value, PatternStatus.CONFIRMED_TYPE2.value]:
                 summary['confirmed_count'] = summary['confirmed_count'] + 1  # type: ignore
-            elif status == PatternStatus.AWAITING_CONFIRMATION.value:
+            elif status in [
+                PatternStatus.AWAITING_CONFIRMATION.value,
+                PatternStatus.TYPE2_CANDIDATE.value,
+            ]:
                 summary['awaiting_confirmation'] = summary['awaiting_confirmation'] + 1  # type: ignore
 
         return summary

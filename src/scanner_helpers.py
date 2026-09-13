@@ -352,7 +352,9 @@ class PatternTrackerUpdater:
         swing_window = self.config_helper.get_int('SWING_WINDOW', 3)
         tech = Technicals(df_full, ticker, data_interval, peak_spacing=swing_window)
 
-        fib_tolerance = self.config_helper.get_float('PYHARMONICS_FIB_TOLERANCE', 0.03)
+        # pyharmonics tolerance is for candidate discovery only; final pattern
+        # validation uses the Carney pattern definitions, not this setting.
+        fib_tolerance = self.config_helper.get_float('PYHARMONICS_FIB_TOLERANCE', 0.01)
         h = HarmonicSearch(tech, fib_tolerance=fib_tolerance, check_anchor=True)
 
         # Detect patterns 85% complete
