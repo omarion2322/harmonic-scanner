@@ -4,9 +4,17 @@
 # Runs the hybrid scanner (Pyharmonics + Scott Carney) and emails/logs results
 
 # Configuration
-PROJECT_DIR="/Users/omer_le/HarmonicProject"
+# Resolve the project directory relative to this script's location so the
+# scanner runs correctly regardless of where the repo is checked out.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 VENV_PATH="$PROJECT_DIR/.venv"
-PYTHON_PATH="$VENV_PATH/bin/python3"
+# Use the venv python if available, otherwise fall back to system python3.
+if [ -x "$VENV_PATH/bin/python3" ]; then
+    PYTHON_PATH="$VENV_PATH/bin/python3"
+else
+    PYTHON_PATH="$(command -v python3)"
+fi
 LOG_DIR="$PROJECT_DIR/logs"
 REPORT_BASE_DIR="$PROJECT_DIR/reports"
 
@@ -88,6 +96,12 @@ if [ $? -eq 0 ]; then
     TIMEFRAME=$("$PYTHON_PATH" -c "import sys; sys.path.insert(0, '$PROJECT_DIR/src'); from config import DATA_INTERVAL; print(DATA_INTERVAL)")
 
     "$PYTHON_PATH" "$PROJECT_DIR/scripts/extract_trades.py" --date "$DATE" --timeframe "$TIMEFRAME" 2>&1 | tee -a "$LOG_FILE"
+
+    # Export a TradingView watchlist (Longs/Shorts grouped by sector, with notes)
+    echo "" | tee -a "$LOG_FILE"
+    echo "Exporting TradingView watchlist..." | tee -a "$LOG_FILE"
+
+    "$PYTHON_PATH" "$PROJECT_DIR/scripts/export_tradingview.py" --date "$DATE" --timeframe "$TIMEFRAME" 2>&1 | tee -a "$LOG_FILE"
 
     # Optional: Send email notification (requires mailx or mail command)
     # Uncomment and configure if you want email alerts

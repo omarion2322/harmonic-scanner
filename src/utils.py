@@ -318,9 +318,20 @@ class FormattingUtils:
         if reaction_data.type2_detected:
             type2_status = "✓ HIT"
             price_info = ""
-            if reaction_data.type2_terminal_bar_price:
-                price_info = f" - Price reached: ${reaction_data.type2_terminal_bar_price:.2f}"
-            price_info += " (Broke B level or exceeded 88.6% of CD)"
+            if reaction_data.type2_entry_price:
+                price_info = (
+                    f" - Entry: ${reaction_data.type2_entry_price:.2f}, "
+                    f"Stop: ${reaction_data.type2_stop_loss:.2f}"
+                )
+            price_info += " (Ordered move, PRZ retest, second reversal)"
+        elif getattr(reaction_data, 'reaction_type', None) == 'TYPE_2_CANDIDATE':
+            type2_status = "◌ CANDIDATE"
+            retest = (
+                f" - Retested {reaction_data.type2_retest_date.date()}"
+                if reaction_data.type2_retest_date
+                else ""
+            )
+            price_info = f"{retest}; waiting for confirmation"
         else:
             type2_status = "✗ NOT HIT"
             price_info = ""

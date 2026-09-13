@@ -1,0 +1,84 @@
+{
+  "snapshot_date": "2026-09-13",
+  "price_data_through": "2026-09-11",
+  "review_target_date": "2026-11-13",
+  "entry_assumption": "Next market open after detected_date",
+  "duplicate_rule": "Keep earliest detected trade per ticker across daily and weekly ledgers",
+  "position_size_usd": 1000,
+  "original_trade_records": 137,
+  "unique_tickers": 122,
+  "duplicates_removed": 15,
+  "entered_trades": 121,
+  "pending_trades": 1,
+  "open_trades": 90,
+  "closed_trades": 31,
+  "capital_allocated_usd": 121000,
+  "realized_pnl_usd": -1972.95,
+  "realized_pnl_pct": -1.63,
+  "unrealized_pnl_usd": 6631.26,
+  "unrealized_pnl_pct": 5.48,
+  "total_pnl_usd": 4658.31,
+  "total_pnl_pct": 3.85,
+  "user_supplied_spy_return_pct": 3.1,
+  "type2_analysis": {
+    "daily_max_days_to_initial_entry": 7,
+    "proposed_max_bars_to_monitor_reaction": 30,
+    "type1_tracker_sample": 521,
+    "type2_tracker_sample": 14,
+    "type1_average_mfe_r": 1.26,
+    "type1_median_mfe_r": 0.75,
+    "type1_average_mae_r": 0.51,
+    "type2_average_mfe_r": 0.56,
+    "type2_median_mfe_r": 0.54,
+    "type2_average_mae_r": 0.39,
+    "conclusion": "Available tracker data does not show higher Type 2 profitability; keep the 7-day fresh-entry gate but monitor reactions separately for up to 30 bars.",
+    "expired_hold_examples": [
+      {
+        "ticker": "NTGR",
+        "pattern": "BAT",
+        "direction": "LONG",
+        "pattern_date": "2026-08-24",
+        "age_days": 20,
+        "tracker_reaction": "TYPE_2",
+        "scanner_result": "HOLD_PATTERN_EXPIRED",
+        "max_favorable_excursion_r": 0.67,
+        "max_adverse_excursion_r": 0.0
+      },
+      {
+        "ticker": "ZO=F",
+        "pattern": "BAT",
+        "direction": "SHORT",
+        "pattern_date": "2026-09-01",
+        "age_days": 12,
+        "tracker_reaction": "TYPE_2",
+        "scanner_result": "HOLD_PATTERN_EXPIRED",
+        "max_favorable_excursion_r": 0.25,
+        "max_adverse_excursion_r": 0.48
+      }
+    ]
+  },
+  "forward_cohort": [
+    {
+      "ticker": "SEVN",
+      "pattern": "BUTTERFLY",
+      "direction": "LONG",
+      "grade": "B-",
+      "planned_entry": 7.31,
+      "stop": 6.21,
+      "original_targets": [10.78, 12.98, 17.15],
+      "proposed_r_targets": [8.41, 9.51, 10.61],
+      "status": "PENDING_NEXT_MARKET_OPEN"
+    },
+    {
+      "ticker": "XNDU",
+      "pattern": "BUTTERFLY",
+      "direction": "LONG",
+      "grade": "B+",
+      "planned_entry": 8.6,
+      "stop": 7.31,
+      "original_targets": [12.65, 19.42, 35.08],
+      "proposed_r_targets": [9.89, 11.18, 12.47],
+      "status": "PENDING_NEXT_MARKET_OPEN"
+    }
+  ]
+}

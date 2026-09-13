@@ -8,7 +8,7 @@ Type 2: Secondary retest of PRZ after Type 1 reaction fails
 
 import pandas as pd
 import numpy as np
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Dict, Any
 from datetime import datetime
 from pydantic import BaseModel, Field, field_validator
 
@@ -17,7 +17,7 @@ class ReactionData(BaseModel):
     """
     Stores data about Type 1 or Type 2 reactions after pattern completion with validation.
     """
-    reaction_type: str = Field(..., pattern='^(TYPE_1|TYPE_2|TYPE_1_FAILED|NONE|PENDING)$',
+    reaction_type: str = Field(..., pattern='^(TYPE_1|TYPE_2_CANDIDATE|TYPE_2|TYPE_1_FAILED|NONE|PENDING)$',
                                 description="Reaction type classification")
     terminal_bar_idx: int = Field(..., ge=0, description="Index of Terminal Price Bar")
     terminal_bar_date: datetime = Field(..., description="Date of terminal bar")
@@ -39,6 +39,17 @@ class ReactionData(BaseModel):
     type2_terminal_bar_idx: Optional[int] = Field(None, ge=0, description="Type 2 terminal bar index")
     type2_terminal_bar_date: Optional[datetime] = Field(None, description="Type 2 terminal bar date")
     type2_terminal_bar_price: Optional[float] = Field(None, gt=0, description="Type 2 terminal bar price")
+    type2_entry_price: Optional[float] = Field(None, gt=0, description="Entry at Type 2 confirmation")
+    type2_stop_loss: Optional[float] = Field(None, gt=0, description="Stop derived from the retest")
+    type2_target_1: Optional[float] = Field(None, gt=0, description="Type 2 1R target")
+    type2_target_2: Optional[float] = Field(None, gt=0, description="Type 2 2R target")
+    type2_target_3: Optional[float] = Field(None, gt=0, description="Type 2 3R target")
+    type2_forward_return_pct: Optional[float] = Field(
+        None, description="Return from Type 2 confirmation entry to latest close"
+    )
+    type2_stop_hit: bool = Field(False, description="Whether the retest-derived stop was hit")
+    type2_max_favorable_move: Optional[float] = Field(None, ge=0)
+    type2_max_adverse_move: Optional[float] = Field(None, ge=0)
 
     # Profit target levels
     target_382: Optional[float] = Field(None, gt=0, description="38.2% profit target")
@@ -66,15 +77,165 @@ class ReactionData(BaseModel):
         }
 
 
+def detect_ordered_type2(
+    df: pd.DataFrame,
+    *,
+    terminal_bar_idx: int,
+    is_bullish: bool,
+    d_price: float,
+    c_price: float,
+    stop_loss: Optional[float] = None,
+    max_bars: int = 30,
+    retest_tolerance: float = 0.02,
+    type1_retrace_min: float = 0.382,
+) -> Dict[str, Any]:
+    """Detect an ordered move-away, PRZ retest, and second reversal."""
+    result: Dict[str, Any] = {
+        'candidate': False,
+        'detected': False,
+        'initial_move_bar_idx': None,
+        'initial_move_date': None,
+        'retest_bar_idx': None,
+        'retest_date': None,
+        'confirmation_bar_idx': None,
+        'confirmation_date': None,
+        'confirmation_price': None,
+        'entry_price': None,
+        'stop_loss': None,
+        'target_1': None,
+        'target_2': None,
+        'target_3': None,
+        'forward_return_pct': None,
+        'stop_hit': False,
+        'max_favorable_move': None,
+        'max_adverse_move': None,
+    }
+
+    if max_bars < 3 or terminal_bar_idx >= len(df) - 2:
+        return result
+
+    high_col = 'high' if 'high' in df.columns else 'High'
+    low_col = 'low' if 'low' in df.columns else 'Low'
+    close_col = 'close' if 'close' in df.columns else 'Close'
+    end_idx = min(terminal_bar_idx + max_bars + 1, len(df))
+    window = df.iloc[terminal_bar_idx + 1:end_idx]
+    if len(window) < 3:
+        return result
+
+    # A stopped pattern cannot later qualify through unrelated price action.
+    if stop_loss is not None:
+        stopped = window[low_col] <= stop_loss if is_bullish else window[high_col] >= stop_loss
+        if stopped.any():
+            first_stop = int(np.flatnonzero(stopped.to_numpy())[0])
+            window = window.iloc[:first_stop]
+            if len(window) < 3:
+                return result
+
+    cd_range = abs(d_price - c_price)
+    if cd_range <= 0:
+        return result
+
+    move_threshold = cd_range * type1_retrace_min * 0.5
+    if is_bullish:
+        moved = window[high_col] >= d_price + move_threshold
+    else:
+        moved = window[low_col] <= d_price - move_threshold
+    if not moved.any():
+        return result
+
+    move_pos = int(np.flatnonzero(moved.to_numpy())[0])
+    move_label = window.index[move_pos]
+    result['initial_move_bar_idx'] = terminal_bar_idx + 1 + move_pos
+    result['initial_move_date'] = move_label
+
+    later = window.iloc[move_pos + 1:]
+    if later.empty:
+        return result
+
+    zone_low = d_price * (1 - retest_tolerance)
+    zone_high = d_price * (1 + retest_tolerance)
+    retested = (later[low_col] <= zone_high) & (later[high_col] >= zone_low)
+    if not retested.any():
+        return result
+
+    retest_pos_in_later = int(np.flatnonzero(retested.to_numpy())[0])
+    retest_pos = move_pos + 1 + retest_pos_in_later
+    retest_label = window.index[retest_pos]
+    retest_row = window.iloc[retest_pos]
+    result['candidate'] = True
+    result['retest_bar_idx'] = terminal_bar_idx + 1 + retest_pos
+    result['retest_date'] = retest_label
+
+    after_retest = window.iloc[retest_pos + 1:]
+    if after_retest.empty:
+        return result
+
+    if is_bullish:
+        retest_price = float(retest_row[low_col])
+        confirmed = after_retest[high_col] >= retest_price + move_threshold
+    else:
+        retest_price = float(retest_row[high_col])
+        confirmed = after_retest[low_col] <= retest_price - move_threshold
+    if not confirmed.any():
+        return result
+
+    confirmation_pos_after_retest = int(np.flatnonzero(confirmed.to_numpy())[0])
+    confirmation_pos = retest_pos + 1 + confirmation_pos_after_retest
+    confirmation_label = window.index[confirmation_pos]
+    confirmation_row = window.iloc[confirmation_pos]
+    entry_price = float(confirmation_row[close_col])
+    type2_stop = (
+        retest_price * (1 - retest_tolerance)
+        if is_bullish
+        else retest_price * (1 + retest_tolerance)
+    )
+    risk = abs(entry_price - type2_stop)
+    if risk <= 0:
+        return result
+
+    direction = 1 if is_bullish else -1
+    latest_close = float(df[close_col].iloc[-1])
+    post_confirmation = df.iloc[terminal_bar_idx + 1 + confirmation_pos:]
+    if is_bullish:
+        stop_hit = bool((post_confirmation[low_col] <= type2_stop).any())
+        max_favorable_move = float(post_confirmation[high_col].max() - entry_price)
+        max_adverse_move = float(entry_price - post_confirmation[low_col].min())
+    else:
+        stop_hit = bool((post_confirmation[high_col] >= type2_stop).any())
+        max_favorable_move = float(entry_price - post_confirmation[low_col].min())
+        max_adverse_move = float(post_confirmation[high_col].max() - entry_price)
+    result.update({
+        'detected': True,
+        'confirmation_bar_idx': terminal_bar_idx + 1 + confirmation_pos,
+        'confirmation_date': confirmation_label,
+        'confirmation_price': entry_price,
+        'entry_price': entry_price,
+        'stop_loss': type2_stop,
+        'target_1': entry_price + direction * risk,
+        'target_2': entry_price + direction * risk * 2,
+        'target_3': entry_price + direction * risk * 3,
+        'forward_return_pct': direction * (latest_close - entry_price) / entry_price * 100,
+        'stop_hit': stop_hit,
+        'max_favorable_move': max(0.0, max_favorable_move),
+        'max_adverse_move': max(0.0, max_adverse_move),
+    })
+    return result
+
+
 class ReactionDetector:
     """
     Detects Type 1 (Reaction) and Type 2 (Reversal) scenarios
     after harmonic pattern completion at point D
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        max_type2_bars: int = 30,
+        type2_retest_tolerance: float = 0.02,
+    ) -> None:
         self.max_type1_bars = 10  # Monitor up to 10 bars for Type 1
-        self.max_type2_bars = 30  # Monitor up to 30 bars total for Type 2
+        self.max_type2_bars = max_type2_bars
+        self.type2_retest_tolerance = type2_retest_tolerance
 
     def detect_reaction(self, df: pd.DataFrame, pattern: Any, current_idx: int) -> ReactionData:
         """
@@ -137,7 +298,7 @@ class ReactionDetector:
         type1_data = self._detect_type1(df, pattern, terminal_bar_idx,
                                        current_idx, target_382, target_618)
 
-        # Check for Type 2 independently (doesn't require Type 1 first)
+        # Type 2 requires an ordered move away, retest, and second reversal.
         type2_data = self._detect_type2(df, pattern, terminal_bar_idx,
                                       current_idx, type1_data)
 
@@ -160,13 +321,22 @@ class ReactionDetector:
         )
 
         # Add Type 2 data if detected
-        if type2_data and type2_data['detected']:
-            reaction.type2_detected = True
+        if type2_data and type2_data.get('candidate'):
+            reaction.type2_detected = bool(type2_data['detected'])
             reaction.type2_retest_bar_idx = type2_data.get('retest_bar_idx')
             reaction.type2_retest_date = type2_data.get('retest_date')
-            reaction.type2_terminal_bar_idx = type2_data.get('terminal_bar_idx')
-            reaction.type2_terminal_bar_date = type2_data.get('terminal_bar_date')
-            reaction.type2_terminal_bar_price = type2_data.get('terminal_bar_price')
+            reaction.type2_terminal_bar_idx = type2_data.get('confirmation_bar_idx')
+            reaction.type2_terminal_bar_date = type2_data.get('confirmation_date')
+            reaction.type2_terminal_bar_price = type2_data.get('confirmation_price')
+            reaction.type2_entry_price = type2_data.get('entry_price')
+            reaction.type2_stop_loss = type2_data.get('stop_loss')
+            reaction.type2_target_1 = type2_data.get('target_1')
+            reaction.type2_target_2 = type2_data.get('target_2')
+            reaction.type2_target_3 = type2_data.get('target_3')
+            reaction.type2_forward_return_pct = type2_data.get('forward_return_pct')
+            reaction.type2_stop_hit = bool(type2_data.get('stop_hit'))
+            reaction.type2_max_favorable_move = type2_data.get('max_favorable_move')
+            reaction.type2_max_adverse_move = type2_data.get('max_adverse_move')
 
         # Generate summary
         reaction.reaction_summary = self._generate_summary(reaction, pattern)
@@ -254,86 +424,25 @@ class ReactionDetector:
     def _detect_type2(self, df: pd.DataFrame, pattern: Any, terminal_bar_idx: int,
                      current_idx: int, type1_data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Detect Type 2 reversal based on:
-        1. Breaking key structural level (B)
-        2. Reaction exceeds 88.6% of CD
-        3. OR creates market structure shift
+        Detect an ordered Type 2 sequence after pattern completion.
         """
-        result = {
-            'detected': False,
-            'retest_bar_idx': None,
-            'retest_date': None,
-            'terminal_bar_idx': None,
-            'terminal_bar_date': None,
-            'terminal_bar_price': None,
-            'b_level_broken': False,
-            'cd_886_exceeded': False
-        }
-
-        # Need sufficient bars to detect Type 2
-        if current_idx - terminal_bar_idx < 5:
-            return result
-
-        # Get data after D point
-        end_idx = min(terminal_bar_idx + self.max_type2_bars, current_idx + 1)
-        df_window = df.iloc[terminal_bar_idx:end_idx]
-
-        if len(df_window) < 2:
-            return result
-
-        # Calculate 88.6% of CD move
-        cd_range = abs(pattern.d.price - pattern.c.price)
-        b_price = pattern.b.price
-        d_price = pattern.d.price
-
-        if pattern.is_bullish:
-            # For bullish: Type 2 requires breaking above B and/or 88.6% CD retracement
-            target_886 = d_price + (cd_range * 0.886)
-
-            # Check if price broke above B level
-            max_high = df_window['high'].max()
-            if max_high >= b_price:
-                result['b_level_broken'] = True
-
-            # Check if price exceeded 88.6% of CD
-            if max_high >= target_886:
-                result['cd_886_exceeded'] = True
-
-            # Type 2 detected if either condition met
-            if result['b_level_broken'] or result['cd_886_exceeded']:
-                result['detected'] = True
-                max_high_idx = df_window['high'].idxmax()
-                result['terminal_bar_idx'] = df.index.get_loc(max_high_idx)
-                result['terminal_bar_date'] = max_high_idx
-                result['terminal_bar_price'] = max_high
-
-        else:
-            # For bearish: Type 2 requires breaking below B and/or 88.6% CD retracement
-            target_886 = d_price - (cd_range * 0.886)
-
-            # Check if price broke below B level
-            min_low = df_window['low'].min()
-            if min_low <= b_price:
-                result['b_level_broken'] = True
-
-            # Check if price exceeded 88.6% of CD
-            if min_low <= target_886:
-                result['cd_886_exceeded'] = True
-
-            # Type 2 detected if either condition met
-            if result['b_level_broken'] or result['cd_886_exceeded']:
-                result['detected'] = True
-                min_low_idx = df_window['low'].idxmin()
-                result['terminal_bar_idx'] = df.index.get_loc(min_low_idx)
-                result['terminal_bar_date'] = min_low_idx
-                result['terminal_bar_price'] = min_low
-
-        return result
+        return detect_ordered_type2(
+            df.iloc[:current_idx + 1],
+            terminal_bar_idx=terminal_bar_idx,
+            is_bullish=pattern.is_bullish,
+            d_price=pattern.d.price,
+            c_price=pattern.c.price,
+            stop_loss=getattr(pattern, 'stop_loss', None),
+            max_bars=self.max_type2_bars,
+            retest_tolerance=self.type2_retest_tolerance,
+        )
 
     def _determine_reaction_type(self, type1_data: Dict[str, Any], type2_data: Optional[Dict[str, Any]]) -> str:
         """Determine overall reaction type."""
         if type2_data and type2_data.get('detected'):
             return 'TYPE_2'
+        elif type2_data and type2_data.get('candidate'):
+            return 'TYPE_2_CANDIDATE'
         elif type1_data.get('detected'):
             if type1_data.get('trendline_broken'):
                 return 'TYPE_1_FAILED'  # Type 1 started but trendline broken, watching for Type 2
@@ -366,9 +475,12 @@ class ReactionDetector:
         elif reaction.reaction_type == 'TYPE_1_FAILED':
             return f"TYPE 1 reaction started but trendline broken - watching for TYPE 2"
 
+        elif reaction.reaction_type == 'TYPE_2_CANDIDATE':
+            return "TYPE 2 CANDIDATE: Initial reaction and PRZ retest found; waiting for a second reversal"
+
         elif reaction.reaction_type == 'TYPE_2':
-            price_str = f" (reached ${reaction.type2_terminal_bar_price:.2f})" if reaction.type2_terminal_bar_price else ""
-            return f"TYPE 2 REVERSAL: Structural break confirmed - exceeded 88.6% of CD or broke B level{price_str}"
+            price_str = f" at ${reaction.type2_entry_price:.2f}" if reaction.type2_entry_price else ""
+            return f"TYPE 2 CONFIRMED: Ordered reaction, PRZ retest, and second reversal{price_str}"
 
         return "Unknown reaction status"
 

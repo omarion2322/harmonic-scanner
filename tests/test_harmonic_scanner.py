@@ -15,6 +15,7 @@ sys.path.insert(0, str(src_path))
 
 from harmonic_scanner import HarmonicScanner, smart_download_data
 from pattern_detector import HarmonicPattern
+from reaction_detector import ReactionData
 from sector_etf_analyzer import SectorETFAnalysis
 from pathlib import Path as PathLib
 
@@ -287,10 +288,65 @@ class TestScanStock:
             'AAPL',
             sample_price_data,
             str(tmp_path),
-            interval='1d',
+            interval=scanner.config_helper.get('DATA_INTERVAL', '1d'),
             reaction_data=None,
             sector_etf_analysis=sector_context,
         )
+
+    @patch('harmonic_scanner.smart_download_data')
+    def test_scan_stock_analyzes_type2_before_initial_entry_expiry(
+        self,
+        mock_download,
+        sample_price_data,
+        sample_pattern_points,
+    ):
+        mock_download.return_value = sample_price_data
+        pattern = HarmonicPattern(
+            x=sample_pattern_points['x'],
+            a=sample_pattern_points['a'],
+            b=sample_pattern_points['b'],
+            c=sample_pattern_points['c'],
+            d=sample_pattern_points['d'],
+            pattern_type='gartley',
+            is_bullish=True,
+            ab_xa_ratio=0.618,
+            bc_ab_ratio=0.618,
+            bc_projection=1.272,
+            cd_bc_ratio=1.272,
+            ad_xa_ratio=0.786,
+            entry_price=101.5,
+            stop_loss=98.0,
+            ipo_target_1=105.0,
+            ipo_target_2=108.0,
+            target_point_a=110.0,
+            risk_reward=2.5,
+            prz_levels={'0.786': 101.5},
+            d_point_range_min=99.5,
+            d_point_range_max=103.5,
+        )
+        reaction = ReactionData(
+            reaction_type='TYPE_2_CANDIDATE',
+            terminal_bar_idx=70,
+            terminal_bar_date=sample_price_data.index[70],
+            terminal_bar_price=101.5,
+            type2_retest_bar_idx=98,
+            type2_retest_date=sample_price_data.index[98],
+            bars_since_completion=29,
+            reaction_summary='Waiting for second reversal',
+        )
+        scanner = HarmonicScanner()
+        scanner.detector.detect_patterns = Mock(return_value=[pattern])
+        scanner.detector.generate_signal = Mock(
+            return_value=('HOLD', 'Pattern expired')
+        )
+        scanner.reaction_detector.detect_reaction = Mock(return_value=reaction)
+
+        result = scanner.scan_stock('AAPL')
+
+        assert result['signal'] == 'HOLD'
+        assert len(result['type2_candidates']) == 1
+        scanner.reaction_detector.detect_reaction.assert_called_once()
+        scanner.detector.generate_signal.assert_called_once()
 
 
 class TestRunScan:

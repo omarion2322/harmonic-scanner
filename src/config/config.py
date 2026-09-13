@@ -25,17 +25,23 @@ _TIMEFRAME_CONFIG = get_timeframe_config(DATA_INTERVAL)
 # These values are automatically set based on DATA_INTERVAL above
 # You can override them manually if needed, but the defaults are optimized
 
-# Fibonacci tolerance for pyharmonics (only when USE_PYHARMONICS_HARMONIC_SEARCH = True)
-# Controls pattern matching precision: 0.03 = 3% tolerance, 0.05 = 5% (more lenient)
+# pyharmonics' fib tolerance is used only for candidate discovery in the library.
+# It must not widen the Carney pattern rules defined in carney_patterns.py.
+# Keep this tight so the library's matching stays conservative and does not
+# override the model's own pattern ranges/definitions.
 PYHARMONICS_FIB_TOLERANCE = 0.03
 
 # Swing point detection window (higher = less sensitive, fewer patterns)
 # Relevant only if using custom detection algorithm (USE_PYHARMONICS_HARMONIC_SEARCH = False)
 SWING_WINDOW = _TIMEFRAME_CONFIG['SWING_WINDOW']
 
-# Maximum days since pattern completion to generate BUY/SELL signal
-# Relevant only if using custom detection algorithm (USE_PYHARMONICS_HARMONIC_SEARCH = False)
-MAX_DAYS_SINCE_PATTERN = _TIMEFRAME_CONFIG['MAX_DAYS_SINCE_PATTERN']
+# The initial PRZ entry expires quickly, but completed patterns remain eligible
+# for Type 2 monitoring on a separate bar-based clock.
+MAX_DAYS_TO_INITIAL_ENTRY = _TIMEFRAME_CONFIG['MAX_DAYS_SINCE_PATTERN']
+MAX_DAYS_SINCE_PATTERN = MAX_DAYS_TO_INITIAL_ENTRY  # Backward compatibility
+MAX_BARS_TO_MONITOR_REACTION = _TIMEFRAME_CONFIG['MAX_BARS_TO_MONITOR_REACTION']
+TYPE2_RETEST_TOLERANCE_PCT = 2.0
+TYPE2_ENTRY_MAX_BARS_AFTER_CONFIRMATION = 1
 
 
 # ============================================================================
@@ -186,7 +192,7 @@ VOLUME_MULTIPLIER = 1.5
 # When True: Shows up to 50 HOLD signals with reasons
 # When False: Only counts HOLD signals in summary
 # Note: HOLD reasons are always generated in verbose mode
-INCLUDE_HOLD_IN_REPORT = False
+INCLUDE_HOLD_IN_REPORT = True
 
 # Verbose mode: Generate detailed asset-specific explanations
 # When True, reports include detailed analysis for each stock explaining
@@ -235,6 +241,15 @@ MIN_RISK_REWARD_RATIO = MIN_LONG_RISK_REWARD_RATIO  # Backward compatibility
 # Long-term harmonic patterns should still be recent enough to be actionable
 # Default: 730 days (2 years) - focuses on patterns with recent market structure
 MAX_PATTERN_AGE_DAYS = 1850
+
+# Require current price still inside the PRZ before emitting BUY/SELL.
+# Historical 1d audit (reports 2026-06-27..2026-08-18): ~40% of exported
+# signals never traded at the planned entry because price had already left
+# the PRZ. Carney entries are PRZ limit orders, not chases.
+REQUIRE_PRICE_IN_PRZ = True
+# Max distance from plan entry to still emit BUY/SELL (percent).
+# 5% = wick at D or pay up to 5%; do not chase beyond that.
+PRZ_ENTRY_TOLERANCE_PCT = 5.0
 
 # ============================================================================
 # POSITION SIZING SETTINGS
@@ -343,7 +358,8 @@ def get_settings_summary():
     print()
     print("PATTERN DETECTION (Optimized for timeframe):")
     print(f"  Swing Window: {SWING_WINDOW}")
-    print(f"  Max Days Since Pattern: {MAX_DAYS_SINCE_PATTERN} days")
+    print(f"  Max Days To Initial Entry: {MAX_DAYS_TO_INITIAL_ENTRY} days")
+    print(f"  Max Bars To Monitor Reaction: {MAX_BARS_TO_MONITOR_REACTION} bars")
     print()
     print("DATA SETTINGS:")
     print(f"  Data Period: {DATA_PERIOD}")
