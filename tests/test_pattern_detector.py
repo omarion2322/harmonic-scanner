@@ -402,6 +402,24 @@ class TestFiveZeroDefinition:
         assert candidate['d'].price == 90.0
         assert candidate['is_bullish'] is True
 
+    def test_skips_five_zero_candidate_with_zero_length_leg(self):
+        detector = PatternDetector()
+        dates = pd.date_range('2023-01-01', periods=6, freq='D')
+        tech = Mock()
+        tech.df = pd.DataFrame(index=dates)
+        tech.peak_data = [
+            (0, 80.0, 0),
+            (1, 100.0, 1),
+            (2, 100.0, 0),
+            (3, 105.0, 1),
+            (4, 75.0, 0),
+            (5, 90.0, 1),
+        ]
+
+        candidates = detector._find_five_zero_candidates(tech, 0.03)
+
+        assert candidates == []
+
     def test_deep_shark_is_not_renamed_to_five_zero(self):
         detector = PatternDetector()
         py_pattern = Mock()

@@ -15,6 +15,7 @@ import pandas as pd
 from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass
 from datetime import datetime
+from tp_strategies.base import TPTargets
 
 
 @dataclass
@@ -92,7 +93,7 @@ class TPScoringEngine:
         tr3 = abs(low - close.shift(1))
 
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        self.df['atr'] = tr.rolling(window=self.atr_period).mean()
+        self.df['atr'] = tr.rolling(window=self.atr_period, min_periods=1).mean()
 
     def _detect_swings(self) -> Tuple[pd.Series, pd.Series]:
         """
@@ -607,162 +608,121 @@ class TPScoringEngine:
 
         return all_zones
 
-    def get_optimal_targets(self, entry_price: float, direction: str,
-                           harmonic_targets: Optional[List[float]] = None,
-                           min_spacing_pct: float = 20.0) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    def get_target_plan(
+        self, entry_price: float, direction: str,
+        harmonic_targets: Optional[List[float]] = None,
+        min_spacing_pct: float = 30.0,
+        min_entry_distance_pct: float = 20.0,
+        atr_multiplier: float = 1.0,
+        include_structure: bool = True,
+    ) -> TPTargets:
+        """Choose the nearest T1, then the strongest sufficiently distant zones.
+
+        Both percentage distances use entry as their denominator, symmetrically
+        for longs and shorts. A missing level remains missing, never extrapolated.
         """
-        Get optimal TP1, TP2, TP3 targets based on scored zones.
+        if direction not in ("LONG", "SHORT"):
+            raise ValueError("TP direction must be LONG or SHORT")
+        if not np.isfinite(entry_price) or entry_price <= 0:
+            raise ValueError("TP entry must be a finite positive price")
+        for value in (min_spacing_pct, min_entry_distance_pct, atr_multiplier):
+            if not np.isfinite(value) or value <= 0:
+                raise ValueError("TP spacing and ATR settings must be finite and positive")
+        atr = float(self.df['atr'].iloc[-1]) if not self.df.empty else 0.0
+        if not np.isfinite(atr) or atr < 0:
+            raise ValueError("Cannot calculate TP spacing from invalid ATR")
+        entry_gap = max(entry_price * min_entry_distance_pct / 100, atr * atr_multiplier)
+        target_gap = max(entry_price * min_spacing_pct / 100, atr * atr_multiplier)
+        sign = 1 if direction == "LONG" else -1
+        # price, lower/upper zone edges, source label
+        selected: List[Tuple[float, float, float, str]] = []
 
-        CRITICAL: Targets must be ordered by distance from entry:
-        - LONG: TP1 < TP2 < TP3 (all above entry)
-        - SHORT: TP1 > TP2 > TP3 (all below entry)
+        def qualifies(price: float, low: float, high: float) -> bool:
+            if not all(np.isfinite(v) for v in (price, low, high)) or price <= 0:
+                raise ValueError("TP candidates must have finite bounds and positive prices")
+            required_distance = entry_gap
+            if selected:
+                required_distance = sign * (selected[-1][0] - entry_price) + target_gap
+            distance = sign * (price - entry_price)
+            if distance < required_distance and not np.isclose(
+                distance, required_distance, rtol=1e-12, atol=1e-12
+            ):
+                return False
+            for _, other_low, other_high, _ in selected:
+                if low < other_high and high > other_low:
+                    return False
+            return True
 
-        NEW: Enforces minimum 20% spacing between targets to ensure meaningful differentiation
-        NEW: Enforces minimum distance from entry for TP1:
-            - LONG: 40% minimum (stocks have unlimited upside)
-            - SHORT: 10% minimum (stocks can't go below $0, more conservative)
-
-        Args:
-            entry_price: Trade entry price
-            direction: 'LONG' or 'SHORT'
-            harmonic_targets: Optional harmonic pattern targets for alignment
-            min_spacing_pct: Minimum percentage spacing between targets (default 20%)
-
-        Returns:
-            Tuple of (TP1, TP2, TP3) prices, properly ordered and spaced
-        """
-        # Direction-specific minimum TP1 distance from entry
-        min_tp1_distance_pct = 40.0 if direction == "LONG" else 10.0
-
-        zones = self.get_tp_zones(entry_price, direction, harmonic_targets)
-
-        if len(zones) == 0:
-            return None, None, None
-
-        # Sort zones by DISTANCE from entry (closest to farthest)
-        if direction == "LONG":
-            # For LONG: sort ascending (closest resistance first)
-            zones_by_distance = sorted(zones, key=lambda z: z.price_center)
-        else:  # SHORT
-            # For SHORT: sort descending (closest support first)
-            zones_by_distance = sorted(zones, key=lambda z: z.price_center, reverse=True)
-
-        # NEW ALGORITHM: Select targets with minimum spacing and maximum scores
-        # Strategy:
-        # 1. Select TP1 from zones at least min_tp1_distance_pct from entry (highest score)
-        # 2. Select TP2 from zones at least min_spacing_pct away from TP1 (highest score)
-        # 3. Select TP3 from zones at least min_spacing_pct away from TP2 (highest score)
-
-        tp1 = None
-        tp2 = None
-        tp3 = None
-
-        # Helper function to check if zone meets minimum spacing
-        def meets_spacing(zone_price: float, reference_price: float, min_pct: float) -> bool:
-            pct_diff = abs((zone_price - reference_price) / reference_price) * 100
-            return pct_diff >= min_pct
-
-        # Step 1: Select TP1 - Pick CLOSEST zone that meets minimum distance from entry
-        # IMPROVED: Changed from "highest score" to "closest" to prioritize recent levels
-        # over old heavily-touched zones far from entry
-        num_zones = len(zones_by_distance)
-        if num_zones == 0:
-            return None, None, None
-
-        # FILTER: Only consider zones at least min_tp1_distance_pct away from entry
-        # For LONG: zone must be at least 40% above entry
-        # For SHORT: zone must be at least 10% below entry
-        tp1_candidates = [z for z in zones_by_distance
-                          if meets_spacing(z.price_center, entry_price, min_tp1_distance_pct)]
-
-        if not tp1_candidates:
-            # No zones meet minimum distance - return None to trigger fallback to fixed method
-            return None, None, None
-
-        # IMPROVED: Pick CLOSEST candidate (first in zones_by_distance) not highest score
-        # zones_by_distance is already sorted by proximity, so tp1_candidates[0] is closest
-        # All candidates already have score >= 40 from get_tp_zones filter
-        tp1_zone = tp1_candidates[0]
-        tp1 = tp1_zone.price_center
-
-        # Step 2: Select TP2 - Must be at least min_spacing_pct away from TP1 in the correct direction
-        if direction == "LONG":
-            # For LONG: TP2 must be ABOVE TP1 and at least min_spacing_pct away
-            tp2_candidates = [z for z in zones_by_distance
-                             if z.price_center > tp1 and meets_spacing(z.price_center, tp1, min_spacing_pct)]
-        else:  # SHORT
-            # For SHORT: TP2 must be BELOW TP1 and at least min_spacing_pct away
-            tp2_candidates = [z for z in zones_by_distance
-                             if z.price_center < tp1 and meets_spacing(z.price_center, tp1, min_spacing_pct)]
-
-        if tp2_candidates:
-            # IMPROVED: Pick CLOSEST candidate, not highest score
-            tp2_zone = tp2_candidates[0]
-            tp2 = tp2_zone.price_center
-        else:
-            # No zones meet spacing - calculate TP2 based on min_spacing_pct from TP1
-            if direction == "LONG":
-                tp2 = tp1 * (1 + min_spacing_pct / 100)
-            else:  # SHORT
-                tp2 = tp1 * (1 - min_spacing_pct / 100)
-
-        # Step 3: Select TP3 - Must be at least min_spacing_pct away from TP2 in the correct direction
-        if direction == "LONG":
-            # For LONG: TP3 must be ABOVE TP2 and at least min_spacing_pct away
-            tp3_candidates = [z for z in zones_by_distance
-                             if z.price_center > tp2 and meets_spacing(z.price_center, tp2, min_spacing_pct)]
-        else:  # SHORT
-            # For SHORT: TP3 must be BELOW TP2 and at least min_spacing_pct away
-            tp3_candidates = [z for z in zones_by_distance
-                             if z.price_center < tp2 and meets_spacing(z.price_center, tp2, min_spacing_pct)]
-
-        if tp3_candidates:
-            # IMPROVED: Pick CLOSEST candidate, not highest score
-            tp3_zone = tp3_candidates[0]
-            tp3 = tp3_zone.price_center
-        else:
-            # No zones meet spacing - calculate TP3 based on min_spacing_pct from TP2
-            if direction == "LONG":
-                tp3 = tp2 * (1 + min_spacing_pct / 100)
-            else:  # SHORT
-                tp3 = tp2 * (1 - min_spacing_pct / 100)
-
-        # Final validation: ensure proper ordering
-        if direction == "LONG":
-            # Ensure entry < T1 < T2 < T3
-            if not (entry_price < tp1 < tp2 < tp3):
-                # Fix ordering if broken
-                all_targets = sorted([t for t in [tp1, tp2, tp3] if t is not None])
-                if len(all_targets) >= 3:
-                    tp1, tp2, tp3 = all_targets[0], all_targets[1], all_targets[2]
-                elif len(all_targets) == 2:
-                    tp1 = all_targets[0]
-                    tp2 = (all_targets[0] + all_targets[1]) / 2
-                    tp3 = all_targets[1]
+        zones = (
+            self.get_tp_zones(entry_price, direction, harmonic_targets)
+            if include_structure else []
+        )
+        projections = sorted(
+            enumerate(harmonic_targets or []), key=lambda item: sign * item[1]
+        )
+        for slot in range(3):
+            eligible = [
+                zone for zone in zones
+                if qualifies(zone.price_center, zone.price_min, zone.price_max)
+            ]
+            if eligible:
+                if slot == 0:
+                    zone = min(eligible, key=lambda z: sign * z.price_center)
                 else:
-                    # Only one target - create spacing manually
-                    tp1 = entry_price * (1 + min_spacing_pct / 100)
-                    tp2 = tp1 * (1 + min_spacing_pct / 100)
-                    tp3 = tp2 * (1 + min_spacing_pct / 100)
+                    zone = min(eligible, key=lambda z: (-z.score, sign * z.price_center))
+                selected.append((
+                    float(zone.price_center), zone.price_min, zone.price_max,
+                    f"Structure ({zone.zone_type}, score {zone.score:.0f})",
+                ))
+                continue
+            # Projections must meet the same rung and spacing requirements.
+            # Never insert one before an already selected structural target.
+            fallback = next(
+                ((index, price) for index, price in projections if qualifies(price, price, price)),
+                None,
+            )
+            if fallback is None:
+                break
+            index, price = fallback
+            label = ("38.2%", "61.8%", "100%")[index] if index < 3 else str(index + 1)
+            selected.append((float(price), price, price, f"Fibonacci {label} (projection)"))
 
-        else:  # SHORT
-            # Ensure entry > T1 > T2 > T3
-            if not (entry_price > tp1 > tp2 > tp3):
-                # Fix ordering if broken
-                all_targets = sorted([t for t in [tp1, tp2, tp3] if t is not None], reverse=True)
-                if len(all_targets) >= 3:
-                    tp1, tp2, tp3 = all_targets[0], all_targets[1], all_targets[2]
-                elif len(all_targets) == 2:
-                    tp1 = all_targets[0]
-                    tp2 = (all_targets[0] + all_targets[1]) / 2
-                    tp3 = all_targets[1]
-                else:
-                    # Only one target - create spacing manually
-                    tp1 = entry_price * (1 - min_spacing_pct / 100)
-                    tp2 = tp1 * (1 - min_spacing_pct / 100)
-                    tp3 = tp2 * (1 - min_spacing_pct / 100)
+        prices: List[Optional[float]] = [candidate[0] for candidate in selected]
+        prices.extend([None] * (3 - len(selected)))
+        provenance = "; ".join(
+            f"T{i}: {candidate[3]}" for i, candidate in enumerate(selected, 1)
+        )
+        description = "; ".join(
+            f"T{i} @ {candidate[0]:.2f}: {candidate[3]}"
+            for i, candidate in enumerate(selected, 1)
+        )
+        target_details: List[Optional[str]] = []
+        for candidate in selected:
+            detail = candidate[3]
+            if detail.startswith("Structure (") and detail.endswith(")"):
+                detail = detail[len("Structure ("):-1]
+            target_details.append(detail)
+        target_details.extend([None] * (3 - len(target_details)))
+        return TPTargets(
+            primary=prices[0], secondary=prices[1], final=prices[2],
+            description=description or "No targets meet the distance and spacing requirements",
+            tp_strategy_used=provenance or "No qualifying targets",
+            target_details=tuple(target_details),
+        )
 
-        return tp1, tp2, tp3
+    def get_optimal_targets(
+        self, entry_price: float, direction: str,
+        harmonic_targets: Optional[List[float]] = None,
+        min_spacing_pct: float = 30.0,
+        min_entry_distance_pct: float = 20.0,
+        atr_multiplier: float = 1.0,
+    ) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+        """Return available targets in order, with absent suffixes left as None."""
+        plan = self.get_target_plan(
+            entry_price, direction, harmonic_targets, min_spacing_pct,
+            min_entry_distance_pct, atr_multiplier,
+        )
+        return plan.primary, plan.secondary, plan.final
 
 
 def test_tp_scoring():

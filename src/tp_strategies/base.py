@@ -6,18 +6,53 @@ Defines the interface that all TP strategies must implement.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional, List
+from typing import Optional, List, Sequence, Tuple
+import math
 import pandas as pd
 
 
 @dataclass
 class TPTargets:
     """Take profit targets returned by strategy"""
-    primary: float  # First take profit level
-    secondary: float  # Second take profit level
+    primary: Optional[float]  # First take profit level, if supported
+    secondary: Optional[float]  # Second take profit level, if supported
     final: Optional[float] = None  # Final take profit level (if applicable)
     description: str = ""  # Description of the strategy targets
     tp_strategy_used: str = ""  # Which TP strategy was used (e.g., "Scoring Engine", "Fixed")
+    target_details: Tuple[Optional[str], Optional[str], Optional[str]] = (
+        None, None, None
+    )
+
+
+def format_target(price: Optional[float]) -> str:
+    """Format an available target without inventing a price for missing levels."""
+    return f"${price:.2f}" if price is not None else "N/A"
+
+
+def target_allocations(
+    targets: Sequence[Optional[float]], weights: Sequence[float]
+) -> Tuple[float, float, float]:
+    """Assign missing exits' allocations to the last available target."""
+    if len(targets) != 3 or len(weights) != 3:
+        raise ValueError("Exactly three target slots and exit weights are required")
+    if any(not math.isfinite(w) or w < 0 for w in weights) or not math.isclose(
+        sum(weights), 1.0, abs_tol=0.001
+    ):
+        raise ValueError("Exit weights must be finite, nonnegative and sum to one")
+    count = 0
+    missing = False
+    for target in targets:
+        if target is None:
+            missing = True
+        elif missing or not math.isfinite(target) or target <= 0:
+            raise ValueError("Targets must be finite positive prices followed by missing slots")
+        else:
+            count += 1
+    allocation = [0.0, 0.0, 0.0]
+    if count:
+        allocation[:count] = weights[:count]
+        allocation[count - 1] += sum(weights[count:])
+    return allocation[0], allocation[1], allocation[2]
 
 
 class TPStrategy(ABC):

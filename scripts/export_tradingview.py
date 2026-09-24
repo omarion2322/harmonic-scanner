@@ -14,6 +14,8 @@ BASE_PATH = Path(__file__).parent.parent
 sys.path.insert(0, str(Path(__file__).parent))
 
 from extract_trades import PaperTrade, parse_report_file  # noqa: E402
+from tp_strategies.base import format_target, target_allocations  # noqa: E402
+from config import POSITION_SIZE_T1, POSITION_SIZE_T2, POSITION_SIZE_T3  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -173,10 +175,22 @@ def build_notes(
                         f"R/R: {trade.risk_reward:g}:1"
                     ),
                     (
-                        f"  Targets: ${trade.target1:g} / "
-                        f"${trade.target2:g} / ${trade.target3:g}"
+                        f"  Targets: ${trade.target1:g} / ${trade.target2:g} / ${trade.target3:g}"
+                        if trade.target3 is not None else
+                        f"  Targets: {format_target(trade.target1)} / "
+                        f"{format_target(trade.target2)} / {format_target(trade.target3)}"
                     ),
                 ])
+                targets = (trade.target1, trade.target2, trade.target3)
+                if targets[0] is not None and targets[2] is None:
+                    allocations = target_allocations(
+                        targets, (POSITION_SIZE_T1, POSITION_SIZE_T2, POSITION_SIZE_T3)
+                    )
+                    lines.append("  Exit Allocation: " + " / ".join(
+                        f"T{i} {allocation:.0%}"
+                        for i, (target, allocation) in enumerate(zip(targets, allocations), 1)
+                        if target is not None
+                    ))
             lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"

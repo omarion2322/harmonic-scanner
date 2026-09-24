@@ -11,6 +11,9 @@ Author: Harmonic Trading System
 """
 
 import json
+import hashlib
+import sqlite3
+from types import SimpleNamespace
 import pandas as pd
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -19,6 +22,10 @@ from enum import Enum
 from pydantic import BaseModel, Field, field_validator
 from logging_config import get_logger
 from reaction_detector import detect_ordered_type2
+from divergence_detector import (
+    DivergenceConfig, DivergenceDetector, MEASURED_STATUSES, closed_retest_date,
+    pattern_anchor, utc_timestamp,
+)
 
 logger = get_logger(__name__)
 
@@ -68,9 +75,9 @@ class PatternSnapshot(BaseModel):
     # Trading levels
     entry_price: float = Field(..., gt=0, description="Entry price")
     stop_loss: float = Field(..., gt=0, description="Stop loss price")
-    target_1: float = Field(..., gt=0, description="First profit target")
-    target_2: float = Field(..., gt=0, description="Second profit target")
-    target_3: float = Field(..., gt=0, description="Third profit target")
+    target_1: Optional[float] = Field(None, gt=0, description="First profit target")
+    target_2: Optional[float] = Field(None, gt=0, description="Second profit target")
+    target_3: Optional[float] = Field(None, gt=0, description="Third profit target")
 
     # Entry locking (Solution 1)
     entry_locked: bool = Field(False, description="True when pattern first completes")
@@ -115,6 +122,9 @@ class PatternSnapshot(BaseModel):
     type2_stop_hit: bool = Field(False, description="Whether the Type 2 stop was hit")
     type2_max_favorable_move: Optional[float] = Field(None, ge=0)
     type2_max_adverse_move: Optional[float] = Field(None, ge=0)
+    divergence: Optional[Dict[str, Any]] = Field(
+        None, description="Contextual momentum evidence; not a trading confirmation"
+    )
 
     @field_validator('targets_hit')
     @classmethod
@@ -194,6 +204,180 @@ class PatternTracker:
 
         # Load existing state
         self.active_patterns = self._load_active_patterns()
+        self.divergence_config = DivergenceConfig()
+        self.divergence_interval = "1d"
+
+    def analyze_divergence(self, ticker: str, pattern: Any, price_data: pd.DataFrame,
+                           interval: str = "1d", as_of: Any = None,
+                           retest_date: Any = None) -> dict:
+        """Persist separate initial-D and ordered-retest samples beyond active expiry.
+
+        SQLite transactions also serialize parallel ticker workers. Configuration
+        revisions are evaluations of the same sample, not additional observations.
+        """
+        observed_at = utc_timestamp(as_of).isoformat()
+        retest_date = closed_retest_date(retest_date, interval, observed_at)
+        initial_evidence = None
+        if retest_date is not None:
+            # Never replace the initial-D ledger with a retest evaluation.
+            initial_evidence = self.analyze_divergence(
+                ticker, pattern, price_data, interval, observed_at
+            )
+        context = "type2_retest" if retest_date is not None else "initial_d"
+        identity = [
+            ticker, pattern.pattern_type, bool(pattern.is_bullish), interval, context,
+            *[utc_timestamp(getattr(pattern, point).date).isoformat() for point in "xabc"],
+        ]
+        if retest_date is not None:
+            identity.extend([utc_timestamp(pattern.d.date).isoformat(), retest_date])
+        sample_id = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
+        evaluation_id = self.divergence_config.evaluation_id_for(context)
+        with sqlite3.connect(self.storage_dir / "divergence.sqlite3", timeout=30) as connection:
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS divergence_samples "
+                "(sample_id TEXT PRIMARY KEY, identity_json TEXT NOT NULL, "
+                "anchor_json TEXT NOT NULL, first_observed_at TEXT NOT NULL)"
+            )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS divergence_evaluations "
+                "(sample_id TEXT NOT NULL, evaluation_id TEXT NOT NULL, payload TEXT NOT NULL, "
+                "PRIMARY KEY (sample_id, evaluation_id))"
+            )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS divergence_point_readings "
+                "(sample_id TEXT NOT NULL, measurement_version TEXT NOT NULL, "
+                "point_role TEXT NOT NULL, indicator TEXT NOT NULL, payload TEXT NOT NULL, "
+                "PRIMARY KEY (sample_id, measurement_version, point_role, indicator))"
+            )
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "INSERT OR IGNORE INTO divergence_samples VALUES (?, ?, ?, ?)",
+                (sample_id, json.dumps(identity),
+                 json.dumps(pattern_anchor(pattern, retest_date)), observed_at),
+            )
+            anchor_json, first_observed = connection.execute(
+                "SELECT anchor_json, first_observed_at FROM divergence_samples WHERE sample_id = ?",
+                (sample_id,),
+            ).fetchone()
+            previous = connection.execute(
+                "SELECT payload FROM divergence_evaluations WHERE sample_id = ? AND evaluation_id = ?",
+                (sample_id, evaluation_id),
+            ).fetchone()
+            old = json.loads(previous[0]) if previous else None
+            anchor = json.loads(anchor_json)
+            detector = DivergenceDetector(self.divergence_config)
+            immutable = bool(old and old["status"] in MEASURED_STATUSES)
+            if immutable and utc_timestamp(old["available_at"]) <= utc_timestamp(observed_at):
+                evidence = old
+                evidence["point_readings"] = {
+                    "d": detector.measure_point(price_data, anchor["d_date"], interval, observed_at),
+                    "retest": detector.measure_point(
+                        price_data, anchor["retest_date"], interval, observed_at
+                    ) if context == "type2_retest" else None,
+                }
+            else:
+                evidence = detector.detect(
+                    price_data, anchor, interval, as_of=observed_at
+                )
+                evidence.update(
+                    sample_id=sample_id,
+                    sample_first_observed_at=first_observed,
+                    evaluation_first_observed_at=(
+                        old["evaluation_first_observed_at"] if old else observed_at
+                    ),
+                    confirmed_observed_at=(
+                        observed_at if evidence["status"] in MEASURED_STATUSES else None
+                    ),
+                )
+            # Numeric observations freeze independently: pending decisions and a
+            # missing MACD warmup must not erase an already captured RSI reading.
+            for role, reading in evidence["point_readings"].items():
+                if reading is None:
+                    continue
+                for name in ("rsi", "macd"):
+                    identity = (sample_id, reading["measurement_version"], role, name)
+                    if reading[name]["value"] is not None:
+                        connection.execute(
+                            "INSERT OR IGNORE INTO divergence_point_readings VALUES (?, ?, ?, ?, ?)",
+                            (*identity, json.dumps(reading[name], allow_nan=False)),
+                        )
+                    saved = connection.execute(
+                        "SELECT payload FROM divergence_point_readings WHERE sample_id=? "
+                        "AND measurement_version=? AND point_role=? AND indicator=?",
+                        identity,
+                    ).fetchone()
+                    if saved:
+                        observation = json.loads(saved[0])
+                        if utc_timestamp(observation["available_at"]) <= utc_timestamp(observed_at):
+                            reading[name] = observation
+                            reading["available_at"] = observation["available_at"]
+            evidence["initial_d_reading"] = (
+                initial_evidence["initial_d_reading"] if initial_evidence is not None
+                else evidence["point_readings"]["d"]
+            )
+            if not immutable:
+                connection.execute(
+                    "INSERT OR REPLACE INTO divergence_evaluations VALUES (?, ?, ?)",
+                    (sample_id, evaluation_id, json.dumps(evidence, allow_nan=False)),
+                )
+        pattern.divergence = evidence
+        return evidence
+
+    def _refresh_snapshot_divergence(self, snapshot: PatternSnapshot,
+                                    price_data: pd.DataFrame, as_of: Any) -> None:
+        if getattr(snapshot, "status", None) == PatternStatus.FORMING.value:
+            # Completion percentage can fall after a bounce even though D was hit.
+            # Do not freeze a projected/missing D, but capture an actual closed bar.
+            closed_d = closed_retest_date(snapshot.d_date, self.divergence_interval, as_of)
+            if (closed_d is None or not isinstance(price_data.index, pd.DatetimeIndex)
+                    or utc_timestamp(closed_d) not in pd.to_datetime(price_data.index, utc=True)):
+                return
+        retest_date = getattr(snapshot, "type2_retest_date", None) or (
+            snapshot.divergence.get("anchor", {}).get("retest_date") if snapshot.divergence else None
+        )
+        retest_date = closed_retest_date(retest_date, self.divergence_interval, as_of)
+        context = "type2_retest" if retest_date is not None else "initial_d"
+        if (snapshot.divergence and snapshot.divergence["status"] in MEASURED_STATUSES
+                and utc_timestamp(snapshot.divergence["available_at"]) <= utc_timestamp(as_of)
+                and not snapshot.divergence.get("persistence_error")
+                and snapshot.divergence.get("context") == context
+                and snapshot.divergence.get("anchor", {}).get("retest_date") == retest_date
+                and (retest_date is None or
+                     utc_timestamp(snapshot.divergence["anchor"]["d_date"])
+                     == utc_timestamp(snapshot.d_date))
+                and snapshot.divergence.get("evaluation_id")
+                == self.divergence_config.evaluation_id_for(context)
+                and all(
+                    reading and all(reading.get(name, {}).get("value") is not None
+                                    for name in ("rsi", "macd"))
+                    for reading in (
+                        snapshot.divergence.get("point_readings", {}).get("d"),
+                        snapshot.divergence.get("initial_d_reading"),
+                        *([snapshot.divergence.get("point_readings", {}).get("retest")]
+                          if retest_date is not None else []),
+                    )
+                )):
+            return
+        pattern = SimpleNamespace(
+            **{point: SimpleNamespace(
+                date=getattr(snapshot, f"{point}_date"),
+                price=getattr(snapshot, f"{point}_price"),
+            ) for point in "xabcd"},
+            pattern_type=snapshot.pattern_type, is_bullish=snapshot.is_bullish,
+            d_point_range_min=snapshot.d_point_range_min,
+            d_point_range_max=snapshot.d_point_range_max,
+        )
+        try:
+            snapshot.divergence = self.analyze_divergence(
+                snapshot.ticker, pattern, price_data, self.divergence_interval, as_of,
+                retest_date=retest_date,
+            )
+        except (sqlite3.Error, OSError) as exc:
+            logger.warning("Could not persist divergence for %s: %s", snapshot.pattern_id, exc)
+            snapshot.divergence = DivergenceDetector(self.divergence_config).detect(
+                price_data, pattern_anchor(pattern, retest_date), self.divergence_interval, as_of
+            )
+            snapshot.divergence["persistence_error"] = True
 
     def _calculate_completion(self, pattern: Any, price_data: pd.DataFrame) -> Tuple[float, str]:
         """
@@ -413,6 +597,18 @@ class PatternTracker:
                 )
                 results['new_patterns'].append(snapshot)
 
+            if (isinstance(getattr(pattern, 'divergence', None), dict)
+                    and not (snapshot.divergence
+                             and snapshot.divergence["status"] in MEASURED_STATUSES
+                             and snapshot.divergence.get("sample_id")
+                             == pattern.divergence.get("sample_id")
+                             and snapshot.divergence.get("context")
+                             == pattern.divergence.get("context")
+                             and snapshot.divergence.get("evaluation_id")
+                             == pattern.divergence.get("evaluation_id"))):
+                snapshot.divergence = pattern.divergence
+            self._refresh_snapshot_divergence(snapshot, price_data, current_timestamp)
+
             # Categorize pattern by status
             if snapshot.status == PatternStatus.FORMING.value:
                 results['watchlist'].append(snapshot)
@@ -439,6 +635,9 @@ class PatternTracker:
         for pattern_id, snapshot in list(self.active_patterns.items()):
             if snapshot.ticker != ticker or pattern_id in processed_pattern_ids:
                 continue
+            if snapshot.status == PatternStatus.FORMING.value:
+                self._refresh_snapshot_divergence(snapshot, price_data, current_timestamp)
+                continue
             if snapshot.status not in {
                 PatternStatus.COMPLETED.value,
                 PatternStatus.AWAITING_CONFIRMATION.value,
@@ -449,6 +648,7 @@ class PatternTracker:
                 continue
 
             self._analyze_reaction(snapshot, price_data)
+            self._refresh_snapshot_divergence(snapshot, price_data, current_timestamp)
             if snapshot.status in {
                 PatternStatus.CONFIRMED_TYPE1.value,
                 PatternStatus.CONFIRMED_TYPE2.value,
@@ -743,18 +943,18 @@ class PatternTracker:
             # Check for targets hit
             targets_hit = []
             if snapshot.is_bullish:
-                if after_d[high_col].max() >= snapshot.target_1:
+                if snapshot.target_1 is not None and after_d[high_col].max() >= snapshot.target_1:
                     targets_hit.append(1)
-                if after_d[high_col].max() >= snapshot.target_2:
+                if snapshot.target_2 is not None and after_d[high_col].max() >= snapshot.target_2:
                     targets_hit.append(2)
-                if after_d[high_col].max() >= snapshot.target_3:
+                if snapshot.target_3 is not None and after_d[high_col].max() >= snapshot.target_3:
                     targets_hit.append(3)
             else:
-                if after_d[low_col].min() <= snapshot.target_1:
+                if snapshot.target_1 is not None and after_d[low_col].min() <= snapshot.target_1:
                     targets_hit.append(1)
-                if after_d[low_col].min() <= snapshot.target_2:
+                if snapshot.target_2 is not None and after_d[low_col].min() <= snapshot.target_2:
                     targets_hit.append(2)
-                if after_d[low_col].min() <= snapshot.target_3:
+                if snapshot.target_3 is not None and after_d[low_col].min() <= snapshot.target_3:
                     targets_hit.append(3)
 
             snapshot.targets_hit = targets_hit

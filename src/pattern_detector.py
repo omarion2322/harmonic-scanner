@@ -33,6 +33,7 @@ except ImportError:
 
 # Import TP strategies
 from tp_strategies import ScottStrategy, MitchStrategy, PositionStrategy, TPStrategy
+from tp_strategies.base import format_target, target_allocations
 from utils import ConfigHelper
 from logging_config import get_logger
 from chart_generator import ChartGenerator
@@ -75,9 +76,9 @@ class HarmonicPattern:
     # Carney's trading specs
     entry_price: float
     stop_loss: float
-    ipo_target_1: float  # Initial Profit Objective (0.382 or 0.618 from pattern range)
-    ipo_target_2: float  # Secondary target
-    target_point_a: float  # Point A (pattern completion target)
+    ipo_target_1: Optional[float]  # First supported target, if available
+    ipo_target_2: Optional[float]  # Secondary target
+    target_point_a: Optional[float]  # Final supported target, not necessarily point A
     risk_reward: float
 
     # PRZ (Potential Reversal Zone) levels
@@ -93,7 +94,11 @@ class HarmonicPattern:
     grade: str = "B"  # A+, A, A-, B+, B, B-, C+, C, C-
     trade_quality: str = "Standard Trade"  # High-Probability Entry, Standard Trade, Standard / Reduced Size, Marginal / Scalp Only
     chart_path: str = ""  # Path to pattern visualization chart
-    tp_strategy_used: str = ""  # Which TP strategy was used (e.g., "Scoring Engine", "Fixed", "Fibonacci")
+    tp_strategy_used: str = ""  # Detailed target provenance for reports
+    tp_strategy_name: str = ""  # Configured TP strategy name
+    tp_target_details: Tuple[Optional[str], Optional[str], Optional[str]] = (
+        None, None, None
+    )
     origin: Optional[Point] = None  # Unmeasured 0 point that precedes a 5-0 structure
 
     # Multi-swing BC leg metadata
@@ -101,6 +106,7 @@ class HarmonicPattern:
     bc_internal_swing_count: int = 0  # Number of internal swings within BC leg (0 = simple BC)
     bc_volatility: float = 0.0  # Volatility within BC leg (std dev of internal swings)
     bc_duration_bars: int = 0  # Number of bars from B to C
+    divergence: Optional[Dict[str, Any]] = None  # Descriptive, context-specific momentum evidence
 
 
 class PatternDetector:
@@ -146,7 +152,12 @@ class PatternDetector:
         swing_window = self.config_helper.get_int('SWING_WINDOW', 5)
 
         if strategy_name == 'MITCH':
-            self._tp_strategy_cache = MitchStrategy(swing_window=swing_window)
+            self._tp_strategy_cache = MitchStrategy(
+                swing_window=swing_window,
+                tp_min_spacing_pct=self.config_helper.get_float('TP_MIN_SPACING_PCT', 30.0),
+                tp_min_entry_distance_pct=self.config_helper.get_float('TP_MIN_ENTRY_DISTANCE_PCT', 20.0),
+                tp_atr_multiplier=self.config_helper.get_float('TP_ATR_MULTIPLIER', 1.0),
+            )
         elif strategy_name == 'POSITION':
             self._tp_strategy_cache = PositionStrategy(swing_window=swing_window)
         else:  # Default to SCOTT
@@ -361,7 +372,10 @@ class PatternDetector:
                 )
 
             points['is_bullish'] = window[0][2] == 0
-            ratios = self._calculate_five_zero_ratios(points)
+            try:
+                ratios = self._calculate_five_zero_ratios(points)
+            except PatternValidationError:
+                continue
             if self._validate_five_zero_structure(
                 ratios, pattern_spec, fib_tolerance
             ):
@@ -627,7 +641,9 @@ class PatternDetector:
             'prz_levels': prz_levels,
             'd_point_range_min': d_point_range_min,
             'd_point_range_max': d_point_range_max,
-            'tp_strategy_used': tp_result['tp_strategy_used']
+            'tp_strategy_used': tp_result['tp_strategy_used'],
+            'tp_strategy_name': tp_result['tp_strategy_name'],
+            'tp_target_details': tp_result['tp_target_details'],
         }
 
     def _calculate_stop_loss(
@@ -725,30 +741,44 @@ class PatternDetector:
         return {
             'ipo_target_1': tp_targets.primary,
             'ipo_target_2': tp_targets.secondary,
-            'target_point_a': tp_targets.final if tp_targets.final else a_price,
-            'tp_strategy_used': tp_targets.tp_strategy_used if hasattr(tp_targets, 'tp_strategy_used') else ""
+            'target_point_a': tp_targets.final,
+            'tp_strategy_used': tp_targets.tp_strategy_used if hasattr(tp_targets, 'tp_strategy_used') else "",
+            'tp_strategy_name': tp_strategy.get_strategy_name(),
+            'tp_target_details': tp_targets.target_details,
         }
 
     def _calculate_risk_reward(
         self,
         entry_price: float,
         stop_loss: float,
-        target_1: float,
-        target_2: float,
-        target_3: float
+        target_1: Optional[float],
+        target_2: Optional[float],
+        target_3: Optional[float]
     ) -> float:
-        """Calculate weighted risk/reward ratio."""
+        """Calculate weighted reward, closing the remainder at the last target."""
         risk = abs(entry_price - stop_loss)
-        reward_t1 = abs(target_1 - entry_price)
-        reward_t2 = abs(target_2 - entry_price)
-        reward_t3 = abs(target_3 - entry_price)
-
-        # Weighted average reward using config position sizing
-        weighted_reward = (reward_t1 * config.POSITION_SIZE_T1) + \
-                        (reward_t2 * config.POSITION_SIZE_T2) + \
-                        (reward_t3 * config.POSITION_SIZE_T3)
-
-        return weighted_reward / risk if risk > 0 else 0
+        targets = (target_1, target_2, target_3)
+        weights = target_allocations(
+            targets,
+            (config.POSITION_SIZE_T1, config.POSITION_SIZE_T2, config.POSITION_SIZE_T3),
+        )
+        if risk == 0:
+            return 0.0
+        direction = 1 if stop_loss < entry_price else -1
+        previous = entry_price
+        weighted_reward = 0.0
+        for target, weight in zip(targets, weights):
+            if target is not None:
+                # Legacy POSITION plans can allocate two exits to the same price.
+                # MITCH enforces distinct, spaced prices during target selection.
+                if (
+                    direction * (target - entry_price) <= 0
+                    or direction * (target - previous) < 0
+                ):
+                    raise ValueError("Profit targets must be ordered on the profitable side of entry")
+                weighted_reward += direction * (target - entry_price) * weight
+                previous = target
+        return weighted_reward / risk
 
     def _validate_temporal_proportionality(self, x_ts: pd.Timestamp, a_ts: pd.Timestamp, b_ts: pd.Timestamp, c_ts: pd.Timestamp, d_ts: pd.Timestamp) -> Tuple[bool, str]:
         """
@@ -882,6 +912,8 @@ class PatternDetector:
             grade=grade,
             trade_quality=trade_quality,
             tp_strategy_used=trading_specs['tp_strategy_used'],
+            tp_strategy_name=trading_specs['tp_strategy_name'],
+            tp_target_details=trading_specs['tp_target_details'],
             origin=points.get('origin'),
             # Multi-swing BC not detected from pyharmonics
             is_multi_swing_bc=False,
@@ -1323,7 +1355,10 @@ class PatternDetector:
             min_rr = 1.5
             signal_type = "LONG" if pattern.is_bullish else "SHORT"
 
-        if pattern.risk_reward < min_rr:
+        # Missing TP targets describe an incomplete exit plan; they do not
+        # invalidate the harmonic pattern or prevent a signal.
+        has_tp_targets = pattern.ipo_target_1 is not None
+        if has_tp_targets and pattern.risk_reward < min_rr:
             return "HOLD", f"Risk/Reward too low for {signal_type} ({pattern.risk_reward:.2f}:1, minimum {min_rr}:1) - pattern detected on {pattern.d.date.date()}"
 
         # Check risk percentage from config
@@ -1411,11 +1446,21 @@ class PatternDetector:
             explanation = self._generate_verbose_explanation(pattern, current_price, signal, direction)
         else:
             # Standard concise explanation
+            target_summary = (
+                f"  T1: {format_target(pattern.ipo_target_1)} | "
+                f"T2: {format_target(pattern.ipo_target_2)} | "
+                f"T3: {format_target(pattern.target_point_a)}"
+            )
+            risk_reward_summary = (
+                f"  Risk/Reward: {pattern.risk_reward:.2f}:1"
+                if has_tp_targets
+                else "  Risk/Reward: Undefined (TP targets not defined)"
+            )
             explanation = (
                 f"{direction} {pattern.pattern_type.upper()} - Grade {pattern.grade} - Detected {pattern.d.date.date()}\n"
                 f"  Entry: ${pattern.entry_price:.2f} | Stop: ${pattern.stop_loss:.2f}\n"
-                f"  T1: ${pattern.ipo_target_1:.2f} | T2: ${pattern.ipo_target_2:.2f} | T3: ${pattern.target_point_a:.2f}\n"
-                f"  Risk/Reward: {pattern.risk_reward:.2f}:1\n"
+                f"{target_summary}\n"
+                f"{risk_reward_summary}\n"
                 f"  Tolerance: {pattern.tolerance_level}"
             )
 
@@ -1538,37 +1583,44 @@ class PatternDetector:
         lines.append(f"  Stop Distance: ${stop_distance:.2f} ({(stop_distance/pattern.entry_price*100):.2f}%)")
         lines.append("")
 
-        # Profit targets (I.P.O. method)
-        lines.append("PROFIT TARGETS (I.P.O. Method - Pattern Range):")
-        lines.append(f"  Target 1 (0.382 I.P.O.): ${pattern.ipo_target_1:.2f}")
-        t1_gain = abs(pattern.ipo_target_1 - pattern.entry_price)
+        lines.append(f"PROFIT TARGETS ({pattern.tp_strategy_used}):")
+        t1_gain = (
+            abs(pattern.ipo_target_1 - pattern.entry_price)
+            if pattern.ipo_target_1 is not None else 0.0
+        )
         t1_pct = (t1_gain / pattern.entry_price) * 100
-        lines.append(f"    Potential Gain: ${t1_gain:.2f} ({t1_pct:.2f}%)")
-
-        lines.append(f"  Target 2 (0.618 I.P.O.): ${pattern.ipo_target_2:.2f}")
-        t2_gain = abs(pattern.ipo_target_2 - pattern.entry_price)
-        t2_pct = (t2_gain / pattern.entry_price) * 100
-        lines.append(f"    Potential Gain: ${t2_gain:.2f} ({t2_pct:.2f}%)")
-
-        lines.append(f"  Target 3 (Point A): ${pattern.target_point_a:.2f}")
-        t3_gain = abs(pattern.target_point_a - pattern.entry_price)
-        t3_pct = (t3_gain / pattern.entry_price) * 100
-        lines.append(f"    Potential Gain: ${t3_gain:.2f} ({t3_pct:.2f}%)")
+        targets = (pattern.ipo_target_1, pattern.ipo_target_2, pattern.target_point_a)
+        allocations = target_allocations(
+            targets,
+            (config.POSITION_SIZE_T1, config.POSITION_SIZE_T2, config.POSITION_SIZE_T3),
+        )
+        for i, (target, allocation) in enumerate(zip(targets, allocations), 1):
+            lines.append(f"  Target {i}: {format_target(target)}")
+            if target is not None:
+                gain = abs(target - pattern.entry_price)
+                lines.append(
+                    f"    Potential Gain: ${gain:.2f} "
+                    f"({gain / pattern.entry_price * 100:.2f}%); exit {allocation:.0%}"
+                )
         lines.append("")
 
         # Risk/Reward
         lines.append("RISK/REWARD ANALYSIS:")
         lines.append(f"  Risk: ${stop_distance:.2f} ({(stop_distance/pattern.entry_price*100):.2f}%)")
-        lines.append(f"  Reward (to T1): ${t1_gain:.2f} ({t1_pct:.2f}%)")
-        lines.append(f"  Risk/Reward Ratio: {pattern.risk_reward:.2f}:1")
-        if pattern.risk_reward >= 3.0:
-            lines.append(f"  Assessment: EXCELLENT - Exceeds 3:1 ratio")
-        elif pattern.risk_reward >= 2.0:
-            lines.append(f"  Assessment: GOOD - Meets 2:1 minimum")
-        elif pattern.risk_reward >= 1.5:
-            lines.append(f"  Assessment: ACCEPTABLE - Above 1.5:1")
+        if pattern.ipo_target_1 is None:
+            lines.append("  Reward: Undefined (TP targets not defined)")
+            lines.append("  Risk/Reward Ratio: Undefined (TP targets not defined)")
         else:
-            lines.append(f"  Assessment: POOR - Below recommended minimum")
+            lines.append(f"  Reward (to T1): ${t1_gain:.2f} ({t1_pct:.2f}%)")
+            lines.append(f"  Risk/Reward Ratio: {pattern.risk_reward:.2f}:1")
+            if pattern.risk_reward >= 3.0:
+                lines.append(f"  Assessment: EXCELLENT - Exceeds 3:1 ratio")
+            elif pattern.risk_reward >= 2.0:
+                lines.append(f"  Assessment: GOOD - Meets 2:1 minimum")
+            elif pattern.risk_reward >= 1.5:
+                lines.append(f"  Assessment: ACCEPTABLE - Above 1.5:1")
+            else:
+                lines.append(f"  Assessment: POOR - Below recommended minimum")
         lines.append("")
 
         # Pattern-specific notes
@@ -1614,21 +1666,27 @@ class PatternDetector:
         if signal == "BUY":
             lines.append(f"  ✓ Bullish {pattern.pattern_type} pattern completed at ${pattern.entry_price:.2f}")
             lines.append(f"  ✓ Current price ${current_price:.2f} is within PRZ tolerance")
-            lines.append(f"  ✓ Risk/Reward ratio of {pattern.risk_reward:.2f}:1 meets minimum")
+            if pattern.ipo_target_1 is None:
+                lines.append("  ⚠ TP targets are not defined")
+            else:
+                lines.append(f"  ✓ Risk/Reward ratio of {pattern.risk_reward:.2f}:1 meets minimum")
             lines.append(f"  ✓ All Fibonacci ratios validated per Carney's specifications")
             lines.append("")
             lines.append(f"  RECOMMENDATION: Consider buying at current price ${current_price:.2f}")
             lines.append(f"  Place stop loss at ${pattern.stop_loss:.2f}")
-            lines.append(f"  Take partial profits at T1: ${pattern.ipo_target_1:.2f}")
+            lines.append(f"  Take profits at T1: {format_target(pattern.ipo_target_1)}")
         elif signal == "SELL":
             lines.append(f"  ✓ Bearish {pattern.pattern_type} pattern completed at ${pattern.entry_price:.2f}")
             lines.append(f"  ✓ Current price ${current_price:.2f} is within PRZ tolerance")
-            lines.append(f"  ✓ Risk/Reward ratio of {pattern.risk_reward:.2f}:1 meets minimum")
+            if pattern.ipo_target_1 is None:
+                lines.append("  ⚠ TP targets are not defined")
+            else:
+                lines.append(f"  ✓ Risk/Reward ratio of {pattern.risk_reward:.2f}:1 meets minimum")
             lines.append(f"  ✓ All Fibonacci ratios validated per Carney's specifications")
             lines.append("")
             lines.append(f"  RECOMMENDATION: Consider selling/shorting at current price ${current_price:.2f}")
             lines.append(f"  Place stop loss at ${pattern.stop_loss:.2f}")
-            lines.append(f"  Take partial profits at T1: ${pattern.ipo_target_1:.2f}")
+            lines.append(f"  Take profits at T1: {format_target(pattern.ipo_target_1)}")
 
         lines.append(f"{'='*70}")
 

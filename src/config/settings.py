@@ -134,6 +134,9 @@ class HarmonicTradingConfig(BaseSettings):
 
     # ==================== TAKE PROFIT STRATEGY ====================
     tp_strategy: Literal['SCOTT', 'MITCH', 'POSITION'] = Field('MITCH')
+    tp_min_entry_distance_pct: float = Field(20.0, gt=0)
+    tp_min_spacing_pct: float = Field(30.0, gt=0)
+    tp_atr_multiplier: float = Field(1.0, gt=0)
 
     @field_validator('position_size_t1', 'position_size_t2', 'position_size_t3')
     @classmethod
