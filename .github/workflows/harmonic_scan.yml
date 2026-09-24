@@ -217,7 +217,6 @@ jobs:
             (
               cd "$PUBLISH_DIR"
               git switch --orphan "$SNAPSHOT_BRANCH"
-              git rm -rf .
             )
           fi
 
