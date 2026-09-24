@@ -309,14 +309,36 @@ def download_stock_data(
             error_str = str(e)
             last_error = error_str
 
-            # Check for specific errors that shouldn't be retried
             error_str_lower = error_str.lower()
 
-            # Don't retry for these permanent errors
-            if any(x in error_str_lower for x in ['invalid ticker', 'not found', 'no data']):
+            # A missing remote Parquet file is a provider failure, not a missing
+            # ticker. Skip retries and let yfinance handle the request.
+            provider_resource_missing = (
+                'http get error' in error_str_lower
+                and (
+                    'http 404' in error_str_lower
+                    or '404 not found' in error_str_lower
+                )
+            )
+            if provider_resource_missing:
                 if not first_failure_logged:
-                    logger.warning("%s: Ticker not found or has no data", ticker)
-                return pd.DataFrame()
+                    logger.warning(
+                        "%s: Defeatbeta dataset unavailable; using yfinance fallback",
+                        ticker,
+                    )
+                    first_failure_logged = True
+                break
+
+            # These ticker-specific errors are not worth retrying against the
+            # same provider, but another provider may still have the symbol.
+            if any(x in error_str_lower for x in ['invalid ticker', 'no data']):
+                if not first_failure_logged:
+                    logger.warning(
+                        "%s: Defeatbeta has no data; using yfinance fallback",
+                        ticker,
+                    )
+                    first_failure_logged = True
+                break
 
         # If we get here, the download failed
         # Log first failure

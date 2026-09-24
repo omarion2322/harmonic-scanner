@@ -10,8 +10,7 @@ Edit these settings to customize the scanner behavior without modifying the main
 
 # Choose your trading timeframe - this will automatically load optimized settings
 # Options: '1d' (daily), '3d' (3-day), '1wk' (weekly), '1mo' (monthly)
-DATA_INTERVAL = '1wk'
-
+DATA_INTERVAL = '1d'
 # Import timeframe-specific optimized configurations
 from .config_timeframes import get_timeframe_config
 
@@ -170,8 +169,24 @@ PARALLEL_MODE = 'thread'
 # CONFIRMATION SETTINGS (for future enhancements)
 # ============================================================================
 
-# Require RSI confirmation (if implemented)
+# Legacy RSI gate placeholder; not used by descriptive divergence.
 REQUIRE_RSI_CONFIRMATION = False
+
+# Experimental descriptive evidence only; never changes grades or trading signals.
+# RSI14 (Wilder), MACD EMA12-EMA26 and ATR14 are fixed by algorithm version.
+# See docs/divergence.md for pivot pairing, bar availability and persistence semantics.
+DIVERGENCE_SETTINGS = {
+    'pivot_left': 2,
+    'pivot_right': 2,
+    'min_spacing': 5,
+    'max_spacing': 60,
+    'd_window': 2,
+    'prz_distance_atr': 0.5,
+    'min_price_atr': 0.1,
+    'min_rsi_points': 3.0,
+    'min_macd_atr': 0.05,
+    'include_histogram': False,
+}
 
 # RSI thresholds for buy/sell
 RSI_OVERSOLD = 30    # Buy signal confirmation
@@ -292,6 +307,12 @@ assert abs(POSITION_SIZE_T1 + POSITION_SIZE_T2 + POSITION_SIZE_T3 - 1.0) < 0.001
 #                Aims for x2-x5 gains on the asset
 #                Holds through intermediate levels for maximum profit potential
 TP_STRATEGY = 'MITCH'
+
+# Percentage distances use entry price for both LONG and SHORT.
+# See docs/take_profit.md for target provenance and partial-plan handling.
+TP_MIN_ENTRY_DISTANCE_PCT = 20.0
+TP_MIN_SPACING_PCT = 30.0
+TP_ATR_MULTIPLIER = 1.0
 
 # ============================================================================
 # HELPER FUNCTIONS

@@ -9,13 +9,14 @@ import sys
 import argparse
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 import yfinance as yf
 from dataclasses import dataclass
 
 # Add src directory to path to import config
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 from config import POSITION_SIZE_T1, POSITION_SIZE_T2, POSITION_SIZE_T3
+from tp_strategies.base import format_target, target_allocations
 
 
 @dataclass
@@ -28,9 +29,9 @@ class TradeStatus:
     entry_price: float
     current_price: float
     stop_loss: float
-    target1: float
-    target2: float
-    target3: float
+    target1: Optional[float]
+    target2: Optional[float]
+    target3: Optional[float]
     risk_reward: float
     grade: str
     timeframe: str
@@ -103,6 +104,10 @@ def check_trade_status(trade: Dict, investment_per_trade: float = 10000.0) -> Tr
         TradeStatus object with current status and P&L
     """
     try:
+        allocation1, allocation2, allocation3 = target_allocations(
+            (trade['target1'], trade['target2'], trade['target3']),
+            (POSITION_SIZE_T1, POSITION_SIZE_T2, POSITION_SIZE_T3),
+        )
         # Get historical data from detected date to now
         ticker_obj = yf.Ticker(trade['ticker'])
         hist = ticker_obj.history(start=trade['detected_date'], end=datetime.now(), interval='1d')
@@ -148,11 +153,11 @@ def check_trade_status(trade: Dict, investment_per_trade: float = 10000.0) -> Tr
                     stop_hit, stop_date = True, date
                     # If gap down, use open price; otherwise use stop loss price
                     stop_hit_price = open_price if open_price < trade['stop_loss'] else trade['stop_loss']
-                if not t1_hit and high >= trade['target1']:
+                if trade['target1'] is not None and not t1_hit and high >= trade['target1']:
                     t1_hit, t1_date = True, date
-                if t1_hit and not t2_hit and high >= trade['target2']:
+                if trade['target2'] is not None and t1_hit and not t2_hit and high >= trade['target2']:
                     t2_hit, t2_date = True, date
-                if t2_hit and not t3_hit and high >= trade['target3']:
+                if trade['target3'] is not None and t2_hit and not t3_hit and high >= trade['target3']:
                     t3_hit, t3_date = True, date
             else:
                 # Short trades
@@ -160,18 +165,18 @@ def check_trade_status(trade: Dict, investment_per_trade: float = 10000.0) -> Tr
                     stop_hit, stop_date = True, date
                     # If gap up, use open price; otherwise use stop loss price
                     stop_hit_price = open_price if open_price > trade['stop_loss'] else trade['stop_loss']
-                if not t1_hit and low <= trade['target1']:
+                if trade['target1'] is not None and not t1_hit and low <= trade['target1']:
                     t1_hit, t1_date = True, date
-                if t1_hit and not t2_hit and low <= trade['target2']:
+                if trade['target2'] is not None and t1_hit and not t2_hit and low <= trade['target2']:
                     t2_hit, t2_date = True, date
-                if t2_hit and not t3_hit and low <= trade['target3']:
+                if trade['target3'] is not None and t2_hit and not t3_hit and low <= trade['target3']:
                     t3_hit, t3_date = True, date
 
         # Calculate P&L with partial profit-taking
         shares = investment_per_trade / trade['entry_price']
-        shares_t1 = shares * POSITION_SIZE_T1
-        shares_t2 = shares * POSITION_SIZE_T2
-        shares_t3 = shares * POSITION_SIZE_T3
+        shares_t1 = shares * allocation1
+        shares_t2 = shares * allocation2
+        shares_t3 = shares * allocation3
 
         total_pnl = 0
         remaining_position = 1.0
@@ -184,17 +189,19 @@ def check_trade_status(trade: Dict, investment_per_trade: float = 10000.0) -> Tr
         # T1
         if t1_before_stop:
             total_pnl += calculate_position_pnl(shares_t1, trade['entry_price'], trade['target1'], trade['signal_type'])
-            remaining_position -= POSITION_SIZE_T1
+            remaining_position -= allocation1
 
         # T2
         if t2_before_stop:
             total_pnl += calculate_position_pnl(shares_t2, trade['entry_price'], trade['target2'], trade['signal_type'])
-            remaining_position -= POSITION_SIZE_T2
+            remaining_position -= allocation2
 
         # T3
         if t3_before_stop:
             total_pnl += calculate_position_pnl(shares_t3, trade['entry_price'], trade['target3'], trade['signal_type'])
-            remaining_position -= POSITION_SIZE_T3
+            remaining_position -= allocation3
+
+        remaining_position = max(0.0, round(remaining_position, 12))
 
         # Remaining position
         if stop_hit and remaining_position > 0:
@@ -313,7 +320,17 @@ def print_trade_status(status: TradeStatus):
           f"{pnl_emoji} {format_pnl(status.total_pnl, status.total_pnl_percent)}")
 
     # Line 3: Target prices
-    print(f"  Targets: T1: ${status.target1:.2f} | T2: ${status.target2:.2f} | T3: ${status.target3:.2f}")
+    print(f"  Targets: T1: {format_target(status.target1)} | T2: {format_target(status.target2)} | T3: {format_target(status.target3)}")
+    targets = (status.target1, status.target2, status.target3)
+    if targets[0] is not None and targets[2] is None:
+        allocations = target_allocations(
+            targets, (POSITION_SIZE_T1, POSITION_SIZE_T2, POSITION_SIZE_T3)
+        )
+        print("  Exit Allocation: " + " / ".join(
+            f"T{i} {allocation:.0%}"
+            for i, (target, allocation) in enumerate(zip(targets, allocations), 1)
+            if target is not None
+        ))
 
 
 def process_trades_file(trades_file: Path, investment_per_trade: float, update_file: bool) -> Tuple[List[TradeStatus], List[Dict]]:

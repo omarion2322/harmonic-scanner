@@ -13,13 +13,15 @@ import sys
 import argparse
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 import yfinance as yf
 
 # Add src directory to path to import config
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 from config import get_timeframe_config, TP_STRATEGY, POSITION_SIZE_T1, POSITION_SIZE_T2, POSITION_SIZE_T3
+from tp_strategies.base import target_allocations
+from extract_trades import parse_report_targets
 
 
 # ============================================================================
@@ -61,9 +63,9 @@ class Trade:
     detected_date: str
     entry_price: float
     stop_loss: float
-    target1: float
-    target2: float
-    target3: float
+    target1: Optional[float]
+    target2: Optional[float]
+    target3: Optional[float]
     current_price: float
     risk_reward: float = 0.0
     grade: str = "C"  # A+, A, A-, B+, B, B-, C+, C, C-
@@ -225,12 +227,10 @@ def parse_report_file(filepath: Path, config: AnalysisConfig) -> Tuple[List[Trad
                     # Extract entry, stop, and targets
                     entry_match = re.search(r'Entry:\s+\$?([\d.]+)', block)
                     stop_match = re.search(r'Stop Loss:\s+\$?([\d.]+)', block)
-                    t1_match = re.search(r'Target 1:\s+\$?([\d.]+)', block)
-                    t2_match = re.search(r'Target 2:\s+\$?([\d.]+)', block)
-                    t3_match = re.search(r'Target 3:\s+\$?([\d.]+)', block)
+                    targets = parse_report_targets(block)
                     rr_match = re.search(r'Risk/Reward:\s+([\d.]+):1', block)
 
-                    if not all([entry_match, stop_match, t1_match, t2_match, t3_match, rr_match]):
+                    if not all([entry_match, stop_match, rr_match]) or targets[0] is None:
                         continue
 
                     risk_reward = float(rr_match.group(1))
@@ -251,9 +251,9 @@ def parse_report_file(filepath: Path, config: AnalysisConfig) -> Tuple[List[Trad
                         detected_date=detected_date,
                         entry_price=float(entry_match.group(1)),
                         stop_loss=float(stop_match.group(1)),
-                        target1=float(t1_match.group(1)),
-                        target2=float(t2_match.group(1)),
-                        target3=float(t3_match.group(1)),
+                        target1=targets[0],
+                        target2=targets[1],
+                        target3=targets[2],
                         current_price=current_price,
                         risk_reward=risk_reward,
                         grade=grade
@@ -283,6 +283,10 @@ def analyze_trade(trade: Trade, config: AnalysisConfig) -> Dict:
         Dict with trade results including P&L
     """
     try:
+        allocation1, allocation2, allocation3 = target_allocations(
+            (trade.target1, trade.target2, trade.target3),
+            (POSITION_SIZE_T1, POSITION_SIZE_T2, POSITION_SIZE_T3),
+        )
         # Get historical data
         ticker_obj = yf.Ticker(trade.ticker)
         hist = ticker_obj.history(start=trade.detected_date, end=datetime.now())
@@ -310,28 +314,28 @@ def analyze_trade(trade: Trade, config: AnalysisConfig) -> Dict:
                 # Long trades
                 if not stop_hit and low <= trade.stop_loss:
                     stop_hit, stop_date = True, date
-                if not t1_hit and high >= trade.target1:
+                if trade.target1 is not None and not t1_hit and high >= trade.target1:
                     t1_hit, t1_date = True, date
-                if t1_hit and not t2_hit and high >= trade.target2:
+                if trade.target2 is not None and t1_hit and not t2_hit and high >= trade.target2:
                     t2_hit, t2_date = True, date
-                if t2_hit and not t3_hit and high >= trade.target3:
+                if trade.target3 is not None and t2_hit and not t3_hit and high >= trade.target3:
                     t3_hit, t3_date = True, date
             else:
                 # Short trades
                 if not stop_hit and high >= trade.stop_loss:
                     stop_hit, stop_date = True, date
-                if not t1_hit and low <= trade.target1:
+                if trade.target1 is not None and not t1_hit and low <= trade.target1:
                     t1_hit, t1_date = True, date
-                if t1_hit and not t2_hit and low <= trade.target2:
+                if trade.target2 is not None and t1_hit and not t2_hit and low <= trade.target2:
                     t2_hit, t2_date = True, date
-                if t2_hit and not t3_hit and low <= trade.target3:
+                if trade.target3 is not None and t2_hit and not t3_hit and low <= trade.target3:
                     t3_hit, t3_date = True, date
 
         # Calculate P&L with partial profit-taking
         shares = config.initial_investment_per_trade / trade.entry_price
-        shares_t1 = shares * POSITION_SIZE_T1
-        shares_t2 = shares * POSITION_SIZE_T2
-        shares_t3 = shares * POSITION_SIZE_T3
+        shares_t1 = shares * allocation1
+        shares_t2 = shares * allocation2
+        shares_t3 = shares * allocation3
 
         total_pnl = 0
         status_parts = []
@@ -345,20 +349,22 @@ def analyze_trade(trade: Trade, config: AnalysisConfig) -> Dict:
         # T1
         if t1_before_stop:
             total_pnl += calculate_position_pnl(shares_t1, trade.entry_price, trade.target1, trade.signal_type)
-            remaining_position -= POSITION_SIZE_T1
+            remaining_position -= allocation1
             status_parts.append(f"T1 on {t1_date.strftime('%Y-%m-%d')}")
 
         # T2
         if t2_before_stop:
             total_pnl += calculate_position_pnl(shares_t2, trade.entry_price, trade.target2, trade.signal_type)
-            remaining_position -= POSITION_SIZE_T2
+            remaining_position -= allocation2
             status_parts.append(f"T2 on {t2_date.strftime('%Y-%m-%d')}")
 
         # T3
         if t3_before_stop:
             total_pnl += calculate_position_pnl(shares_t3, trade.entry_price, trade.target3, trade.signal_type)
-            remaining_position -= POSITION_SIZE_T3
+            remaining_position -= allocation3
             status_parts.append(f"T3 on {t3_date.strftime('%Y-%m-%d')}")
+
+        remaining_position = max(0.0, round(remaining_position, 12))
 
         # Remaining position
         if stop_hit and remaining_position > 0:

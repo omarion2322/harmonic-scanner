@@ -13,6 +13,7 @@ This is the conservative, rule-based approach tied to pattern geometry.
 """
 
 from tp_strategies.base import TPStrategy, TPTargets
+from carney_patterns import calculate_ipo_target
 import pandas as pd
 from typing import Optional
 
@@ -43,18 +44,10 @@ class ScottStrategy(TPStrategy):
         Uses 38.2% and 61.8% retracements of the full pattern range,
         with final target at the pattern extreme (100%).
         """
-        pattern_range = pattern_high - pattern_low
-
-        if is_bullish:
-            # Bullish: measure retracements from pattern low
-            primary = pattern_low + (pattern_range * 0.382)
-            secondary = pattern_low + (pattern_range * 0.618)
-            final = pattern_high  # 100% = point A or pattern high
-        else:
-            # Bearish: measure retracements from pattern high
-            primary = pattern_high - (pattern_range * 0.382)
-            secondary = pattern_high - (pattern_range * 0.618)
-            final = pattern_low  # 100% = point A or pattern low
+        primary, secondary = calculate_ipo_target(
+            pattern_high, pattern_low, is_bullish
+        )
+        final = pattern_high if is_bullish else pattern_low
 
         description = (
             f"Scott Carney I.P.O.: 38.2% @ {primary:.2f}, "
@@ -66,7 +59,12 @@ class ScottStrategy(TPStrategy):
             secondary=secondary,
             final=final,
             description=description,
-            tp_strategy_used="Fibonacci"
+            tp_strategy_used="Fibonacci",
+            target_details=(
+                "Fibonacci 38.2% (projection)",
+                "Fibonacci 61.8% (projection)",
+                "Fibonacci 100% (projection)",
+            ),
         )
 
     def get_strategy_name(self) -> str:

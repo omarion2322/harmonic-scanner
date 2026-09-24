@@ -34,6 +34,9 @@ class ReactionData(BaseModel):
 
     # Type 2 specific
     type2_detected: bool = Field(False, description="Whether Type 2 reaction detected")
+    type2_reaction_area_low: Optional[float] = Field(None, gt=0, description="Lower bound of the Type 2 retest zone")
+    type2_reaction_area_high: Optional[float] = Field(None, gt=0, description="Upper bound of the Type 2 retest zone")
+    type2_retest_price: Optional[float] = Field(None, gt=0, description="Directional extreme of the retest candle")
     type2_retest_bar_idx: Optional[int] = Field(None, ge=0, description="Type 2 retest bar index")
     type2_retest_date: Optional[datetime] = Field(None, description="Type 2 retest date")
     type2_terminal_bar_idx: Optional[int] = Field(None, ge=0, description="Type 2 terminal bar index")
@@ -97,6 +100,7 @@ def detect_ordered_type2(
         'initial_move_date': None,
         'retest_bar_idx': None,
         'retest_date': None,
+        'retest_price': None,
         'confirmation_bar_idx': None,
         'confirmation_date': None,
         'confirmation_price': None,
@@ -165,6 +169,7 @@ def detect_ordered_type2(
     result['candidate'] = True
     result['retest_bar_idx'] = terminal_bar_idx + 1 + retest_pos
     result['retest_date'] = retest_label
+    result['retest_price'] = float(retest_row[low_col] if is_bullish else retest_row[high_col])
 
     after_retest = window.iloc[retest_pos + 1:]
     if after_retest.empty:
@@ -252,6 +257,10 @@ class ReactionDetector:
         # Terminal Bar is at point D - use date to find actual df index
         terminal_bar_date = pattern.d.date
         terminal_bar_price = pattern.d.price
+        reaction_area = {
+            'type2_reaction_area_low': terminal_bar_price * (1 - self.type2_retest_tolerance),
+            'type2_reaction_area_high': terminal_bar_price * (1 + self.type2_retest_tolerance),
+        }
 
         # Find the actual index in the dataframe using the date
         try:
@@ -291,7 +300,8 @@ class ReactionDetector:
                 target_382=target_382,
                 target_618=target_618,
                 bars_since_completion=bars_since_completion,
-                reaction_summary="Pattern just completed - monitoring for reaction"
+                reaction_summary="Pattern just completed - monitoring for reaction",
+                **reaction_area,
             )
 
         # Detect Type 1 Reaction
@@ -317,7 +327,8 @@ class ReactionDetector:
             type1_trendline_broken=type1_data.get('trendline_broken', False),
             target_382=target_382,
             target_618=target_618,
-            bars_since_completion=bars_since_completion
+            bars_since_completion=bars_since_completion,
+            **reaction_area,
         )
 
         # Add Type 2 data if detected
@@ -325,6 +336,7 @@ class ReactionDetector:
             reaction.type2_detected = bool(type2_data['detected'])
             reaction.type2_retest_bar_idx = type2_data.get('retest_bar_idx')
             reaction.type2_retest_date = type2_data.get('retest_date')
+            reaction.type2_retest_price = type2_data.get('retest_price')
             reaction.type2_terminal_bar_idx = type2_data.get('confirmation_bar_idx')
             reaction.type2_terminal_bar_date = type2_data.get('confirmation_date')
             reaction.type2_terminal_bar_price = type2_data.get('confirmation_price')

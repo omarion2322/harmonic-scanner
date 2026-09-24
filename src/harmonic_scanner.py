@@ -14,9 +14,14 @@ import time
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 import threading
 import multiprocessing
+import sqlite3
 
 from pattern_detector import PatternDetector
+from tp_strategies.base import format_target, target_allocations
 from reaction_detector import ReactionDetector
+from divergence_detector import (
+    DivergenceConfig, DivergenceDetector, closed_retest_date, format_divergence, pattern_anchor,
+)
 from data_downloader import download_stock_data
 from crypto_data_downloader import download_crypto_data
 from pattern_tracker import PatternTracker, PatternStatus
@@ -128,6 +133,8 @@ class HarmonicScanner:
             type2_retest_tolerance=retest_tolerance,
         )
         self.tracker = PatternTracker(storage_dir="./pattern_tracking")
+        self.tracker.divergence_config = DivergenceConfig.from_settings(config)
+        self.tracker.divergence_interval = self.config_helper.get('DATA_INTERVAL', '1d')
         self.tracker.MAX_REACTION_BARS = max_reaction_bars
         self.tracker.TYPE2_RETEST_TOLERANCE = retest_tolerance
         self.path_manager = PathManager()
@@ -284,6 +291,20 @@ class HarmonicScanner:
                 reaction = self.reaction_detector.detect_reaction(
                     df, pattern, current_idx
                 )
+                retest_date = closed_retest_date(
+                    getattr(reaction, "type2_retest_date", None), data_interval
+                )
+                # Expected storage failures are visible without changing the trading path.
+                try:
+                    self.tracker.analyze_divergence(
+                        ticker, pattern, df, data_interval, retest_date=retest_date
+                    )
+                except (sqlite3.Error, OSError) as exc:
+                    logger.warning("%s: Divergence persistence unavailable: %s", ticker, exc)
+                    pattern.divergence = DivergenceDetector(
+                        self.tracker.divergence_config
+                    ).detect(df, pattern_anchor(pattern, retest_date), data_interval)
+                    pattern.divergence["persistence_error"] = True
                 if (
                     reaction is not None
                     and reaction.bars_since_completion <= max_reaction_bars
@@ -410,6 +431,7 @@ class HarmonicScanner:
                 'type2_confirmations': type2_confirmations,
                 'type2_candidates': type2_candidates,
                 'sector_etf_analysis': sector_etf_analysis,
+                'divergence': getattr(signal_pattern, 'divergence', None),
                 '_df': df  # Include DataFrame for pattern tracker (avoid re-download)
             }
 
@@ -805,6 +827,7 @@ class HarmonicScanner:
         report_lines.append("")
 
         self._append_type2_sections(report_lines, results)
+        self._append_divergence_section(report_lines, results)
 
         # BUY signals
         direct_buy_signals = [
@@ -836,13 +859,17 @@ class HarmonicScanner:
 
                     report_lines.append(f"  Entry: ${pattern.entry_price:.2f}")
                     report_lines.append(f"  Stop Loss: ${pattern.stop_loss:.2f}")
-                    report_lines.append(f"  Target 1: ${pattern.ipo_target_1:.2f}")
-                    report_lines.append(f"  Target 2: ${pattern.ipo_target_2:.2f}")
-                    report_lines.append(f"  Target 3: ${pattern.target_point_a:.2f}")
+                    report_lines.append(f"  Target 1: {format_target(pattern.ipo_target_1)}")
+                    report_lines.append(f"  Target 2: {format_target(pattern.ipo_target_2)}")
+                    report_lines.append(f"  Target 3: {format_target(pattern.target_point_a)}")
+                    self._append_target_allocations(report_lines, pattern)
                     # Add TP strategy indication
                     if hasattr(pattern, 'tp_strategy_used') and pattern.tp_strategy_used:
                         report_lines.append(f"  TP Targets: {pattern.tp_strategy_used}")
-                    report_lines.append(f"  Risk/Reward: {pattern.risk_reward:.2f}:1")
+                    if pattern.ipo_target_1 is None:
+                        report_lines.append("  Risk/Reward: Undefined (TP targets not defined)")
+                    else:
+                        report_lines.append(f"  Risk/Reward: {pattern.risk_reward:.2f}:1")
                     report_lines.append(f"  Ratios: {FormattingUtils.format_pattern_ratios(pattern)}")
 
                 # Add reaction information if available (using FormattingUtils)
@@ -892,13 +919,17 @@ class HarmonicScanner:
 
                     report_lines.append(f"  Entry: ${pattern.entry_price:.2f}")
                     report_lines.append(f"  Stop Loss: ${pattern.stop_loss:.2f}")
-                    report_lines.append(f"  Target 1: ${pattern.ipo_target_1:.2f}")
-                    report_lines.append(f"  Target 2: ${pattern.ipo_target_2:.2f}")
-                    report_lines.append(f"  Target 3: ${pattern.target_point_a:.2f}")
+                    report_lines.append(f"  Target 1: {format_target(pattern.ipo_target_1)}")
+                    report_lines.append(f"  Target 2: {format_target(pattern.ipo_target_2)}")
+                    report_lines.append(f"  Target 3: {format_target(pattern.target_point_a)}")
+                    self._append_target_allocations(report_lines, pattern)
                     # Add TP strategy indication
                     if hasattr(pattern, 'tp_strategy_used') and pattern.tp_strategy_used:
                         report_lines.append(f"  TP Targets: {pattern.tp_strategy_used}")
-                    report_lines.append(f"  Risk/Reward: {pattern.risk_reward:.2f}:1")
+                    if pattern.ipo_target_1 is None:
+                        report_lines.append("  Risk/Reward: Undefined (TP targets not defined)")
+                    else:
+                        report_lines.append(f"  Risk/Reward: {pattern.risk_reward:.2f}:1")
                     report_lines.append(f"  Ratios: {FormattingUtils.format_pattern_ratios(pattern)}")
 
                 # Add reaction information if available (using FormattingUtils)
@@ -1013,6 +1044,21 @@ class HarmonicScanner:
 
         return "\n".join(report_lines)
 
+    def _append_target_allocations(self, report_lines: List[str], pattern: Any) -> None:
+        targets = (pattern.ipo_target_1, pattern.ipo_target_2, pattern.target_point_a)
+        if targets[0] is None or targets[2] is not None:
+            return
+        weights = tuple(
+            self.config_helper.get_float(f'POSITION_SIZE_T{i}', default)
+            for i, default in enumerate((0.2, 0.3, 0.5), 1)
+        )
+        allocations = target_allocations(targets, weights)
+        report_lines.append("  Exit Allocation: " + " / ".join(
+            f"T{i} {allocation:.0%}"
+            for i, (target, allocation) in enumerate(zip(targets, allocations), 1)
+            if target is not None
+        ))
+
     @staticmethod
     def _append_type2_sections(
         report_lines: List[str],
@@ -1103,6 +1149,27 @@ class HarmonicScanner:
                 report_lines.append("Status: NOT ACTIONABLE")
                 report_lines.append("-" * 80)
                 report_lines.append("")
+
+    @staticmethod
+    def _append_divergence_section(report_lines: List[str], results: dict) -> None:
+        """Include context-specific evidence for every pattern, including HOLD."""
+        rows = [
+            (analysis['ticker'], pattern)
+            for signal in ('BUY', 'SELL', 'HOLD')
+            for analysis in results.get(signal, [])
+            for pattern in analysis.get('patterns', [])
+        ]
+        if not rows:
+            return
+        report_lines.extend([
+            "=" * 80, "MOMENTUM DIVERGENCE — DESCRIPTIVE EVIDENCE",
+            "Source switches to the ordered Type 2 retest when reached.",
+            "Does not change grades, eligibility or signals.", "",
+        ])
+        for ticker, pattern in rows:
+            report_lines.append(f"{ticker} | {pattern.pattern_type} | D {pattern.d.date}")
+            report_lines.extend(format_divergence(getattr(pattern, 'divergence', None)).splitlines())
+            report_lines.append("")
 
     @staticmethod
     def _append_sector_etf_report(

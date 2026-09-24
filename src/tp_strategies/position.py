@@ -173,6 +173,9 @@ class PositionStrategy(TPStrategy):
             primary = fib_1618
             secondary = fib_2618
             final = fib_3618
+            primary_name = "Fib 1.618"
+            secondary_name = "Fib 2.618"
+            final_name = "Fib 3.618"
             desc = f"Position Strategy: Fib 1.618 @ {primary:.2f} → Fib 2.618 @ {secondary:.2f} → Fib 3.618 @ {final:.2f}"
 
         return TPTargets(
@@ -180,7 +183,8 @@ class PositionStrategy(TPStrategy):
             secondary=secondary,
             final=final,
             description=desc,
-            tp_strategy_used=mitch_targets.tp_strategy_used if hasattr(mitch_targets, 'tp_strategy_used') and mitch_targets.tp_strategy_used else "Combined"
+            tp_strategy_used=mitch_targets.tp_strategy_used if hasattr(mitch_targets, 'tp_strategy_used') and mitch_targets.tp_strategy_used else "Combined",
+            target_details=(primary_name, secondary_name, final_name),
         )
 
     def _calculate_bearish_position_targets(self,
@@ -257,6 +261,9 @@ class PositionStrategy(TPStrategy):
             primary = fib_1618
             secondary = fib_2618
             final = fib_3618
+            primary_name = "Fib 1.618"
+            secondary_name = "Fib 2.618"
+            final_name = "Fib 3.618"
             desc = f"Position Strategy: Fib 1.618 @ {primary:.2f} → Fib 2.618 @ {secondary:.2f} → Fib 3.618 @ {final:.2f}"
 
         return TPTargets(
@@ -264,7 +271,8 @@ class PositionStrategy(TPStrategy):
             secondary=secondary,
             final=final,
             description=desc,
-            tp_strategy_used=mitch_targets.tp_strategy_used if hasattr(mitch_targets, 'tp_strategy_used') and mitch_targets.tp_strategy_used else "Combined"
+            tp_strategy_used=mitch_targets.tp_strategy_used if hasattr(mitch_targets, 'tp_strategy_used') and mitch_targets.tp_strategy_used else "Combined",
+            target_details=(primary_name, secondary_name, final_name),
         )
 
     def _find_major_levels(self, data: pd.DataFrame, is_high: bool, count: int = 3) -> List[float]:

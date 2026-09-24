@@ -10,12 +10,13 @@ import sys
 import argparse
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Set
+from typing import Dict, List, Optional, Set, Tuple
 from dataclasses import dataclass, asdict
 
 # Add src directory to path to import config
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 from config import get_timeframe_config
+from tp_strategies.base import target_allocations
 
 
 @dataclass
@@ -27,9 +28,9 @@ class PaperTrade:
     detected_date: str
     entry_price: float
     stop_loss: float
-    target1: float
-    target2: float
-    target3: float
+    target1: Optional[float]
+    target2: Optional[float]
+    target3: Optional[float]
     risk_reward: float
     grade: str
     timeframe: str
@@ -47,8 +48,35 @@ class PaperTrade:
         return f"{self.ticker}_{self.signal_type}_{pattern_normalized}_{self.timeframe}"
 
 
+def parse_report_targets(block: str) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """Require three explicit target lines and accept only an absent suffix."""
+    targets = []
+    for index in (1, 2, 3):
+        matches = re.findall(
+            rf"^[ \t]*Target {index}:[ \t]*(N/A|\$?\d+(?:\.\d+)?)[ \t]*$",
+            block, re.MULTILINE,
+        )
+        if len(matches) != 1:
+            raise ValueError(f"Missing or malformed Target {index}")
+        targets.append(None if matches[0] == "N/A" else float(matches[0].lstrip("$")))
+    target_allocations(targets, (0.2, 0.3, 0.5))
+    return targets[0], targets[1], targets[2]
+
+
+def resolve_rr_thresholds(
+    timeframe: str, min_long_rr: Optional[float], min_short_rr: Optional[float]
+) -> Tuple[float, float]:
+    """Default collection filters to the scanner's timeframe-specific gates."""
+    settings = get_timeframe_config(timeframe)
+    return (
+        settings['MIN_LONG_RISK_REWARD_RATIO'] if min_long_rr is None else min_long_rr,
+        settings['MIN_SHORT_RISK_REWARD_RATIO'] if min_short_rr is None else min_short_rr,
+    )
+
+
 def parse_report_file(filepath: Path, timeframe: str, min_grade: str = "C-",
-                      min_long_rr: float = 4.0, min_short_rr: float = 4.0) -> List[PaperTrade]:
+                      min_long_rr: Optional[float] = None,
+                      min_short_rr: Optional[float] = None) -> List[PaperTrade]:
     """
     Parse the report file and extract BUY and SELL trades with filters.
 
@@ -62,6 +90,7 @@ def parse_report_file(filepath: Path, timeframe: str, min_grade: str = "C-",
     Returns:
         List of PaperTrade objects
     """
+    min_long_rr, min_short_rr = resolve_rr_thresholds(timeframe, min_long_rr, min_short_rr)
     with open(filepath, 'r') as f:
         content = f.read()
 
@@ -111,12 +140,10 @@ def parse_report_file(filepath: Path, timeframe: str, min_grade: str = "C-",
                     # Extract entry, stop, and targets
                     entry_match = re.search(r'Entry:\s+\$?([\d.]+)', block)
                     stop_match = re.search(r'Stop Loss:\s+\$?([\d.]+)', block)
-                    t1_match = re.search(r'Target 1:\s+\$?([\d.]+)', block)
-                    t2_match = re.search(r'Target 2:\s+\$?([\d.]+)', block)
-                    t3_match = re.search(r'Target 3:\s+\$?([\d.]+)', block)
+                    targets = parse_report_targets(block)
                     rr_match = re.search(r'Risk/Reward:\s+([\d.]+):1', block)
 
-                    if not all([entry_match, stop_match, t1_match, t2_match, t3_match, rr_match]):
+                    if not all([entry_match, stop_match, rr_match]) or targets[0] is None:
                         continue
 
                     risk_reward = float(rr_match.group(1))
@@ -137,9 +164,9 @@ def parse_report_file(filepath: Path, timeframe: str, min_grade: str = "C-",
                         detected_date=detected_date,
                         entry_price=float(entry_match.group(1)),
                         stop_loss=float(stop_match.group(1)),
-                        target1=float(t1_match.group(1)),
-                        target2=float(t2_match.group(1)),
-                        target3=float(t3_match.group(1)),
+                        target1=targets[0],
+                        target2=targets[1],
+                        target3=targets[2],
                         risk_reward=risk_reward,
                         grade=grade,
                         timeframe=timeframe,
@@ -199,8 +226,8 @@ def save_trades_to_json(trades: List[Dict], filepath: Path):
 
 
 def extract_trades(report_date: str = None, timeframe: str = '1wk',
-                   min_grade: str = "C-", min_long_rr: float = 4.0,
-                   min_short_rr: float = 4.0, output_file: str = None):
+                   min_grade: str = "C-", min_long_rr: Optional[float] = None,
+                   min_short_rr: Optional[float] = None, output_file: str = None):
     """
     Extract trades from report and save to JSON with duplicate prevention.
 
@@ -233,6 +260,7 @@ def extract_trades(report_date: str = None, timeframe: str = '1wk',
         print(f"Error: Report file not found at {report_path}")
         return
 
+    min_long_rr, min_short_rr = resolve_rr_thresholds(timeframe, min_long_rr, min_short_rr)
     print(f"Extracting trades from {report_path}")
     print(f"Filters: Grade >= {min_grade}, LONG R/R >= {min_long_rr}, SHORT R/R >= {min_short_rr}")
 
@@ -313,10 +341,10 @@ Examples:
                        help='Timeframe (default: 1wk)')
     parser.add_argument('--min-grade', default='C-',
                        help='Minimum pattern grade (default: C-)')
-    parser.add_argument('--min-long-rr', type=float, default=4.0,
-                       help='Minimum R/R for LONG trades (default: 4.0)')
-    parser.add_argument('--min-short-rr', type=float, default=4.0,
-                       help='Minimum R/R for SHORT trades (default: 4.0)')
+    parser.add_argument('--min-long-rr', type=float, default=None,
+                       help='Minimum LONG R/R (default: scanner timeframe setting)')
+    parser.add_argument('--min-short-rr', type=float, default=None,
+                       help='Minimum SHORT R/R (default: scanner timeframe setting)')
     parser.add_argument('--output', help='Output JSON file path (default: paper_trades.json)')
 
     return parser.parse_args()
