@@ -1,5 +1,8 @@
 name: Harmonic Scan
 
+permissions:
+  contents: write
+
 on:
   # Scheduled run - runs BOTH daily and weekly concurrently
   schedule:
@@ -173,6 +176,66 @@ jobs:
           echo "✅ ALL SCANS COMPLETE"
           echo "========================================================================="
 
+      - name: Generate market snapshot
+        if: always()
+        env:
+          TIMEFRAMES: ${{ needs.setup.outputs.timeframes }}
+          TP_STRATEGY: ${{ needs.setup.outputs.tp_strategy }}
+        run: |
+          REPORT_DATE=$(date +%Y-%m-%d)
+          TIMEFRAMES_CSV=$(echo "$TIMEFRAMES" | jq -r 'join(",")')
+          WORKFLOW_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+          python scripts/generate_market_snapshot.py \
+            --report-date "$REPORT_DATE" \
+            --timeframes "$TIMEFRAMES_CSV" \
+            --workflow-run-url "$WORKFLOW_RUN_URL" \
+            --tp-strategy "$TP_STRATEGY"
+
+      - name: Publish market snapshot branch
+        if: always()
+        env:
+          SNAPSHOT_BRANCH: market-snapshots
+        run: |
+          SNAPSHOT_DATE=$(date +%Y-%m-%d)
+          SNAPSHOT_SOURCE="market_snapshots/$SNAPSHOT_DATE"
+          if [ ! -f "$SNAPSHOT_SOURCE/MARKET_SNAPSHOT.md" ]; then
+            echo "No market snapshot was generated; skipping branch publication."
+            exit 0
+          fi
+
+          PUBLISH_DIR="$RUNNER_TEMP/market-snapshot-${GITHUB_RUN_ID}"
+          git fetch origin "$SNAPSHOT_BRANCH" || true
+          if git ls-remote --exit-code --heads origin "$SNAPSHOT_BRANCH"; then
+            git worktree add --detach "$PUBLISH_DIR" "origin/$SNAPSHOT_BRANCH"
+            (
+              cd "$PUBLISH_DIR"
+              git switch --track -c "$SNAPSHOT_BRANCH" "origin/$SNAPSHOT_BRANCH"
+            )
+          else
+            git worktree add --detach "$PUBLISH_DIR" HEAD
+            (
+              cd "$PUBLISH_DIR"
+              git switch --orphan "$SNAPSHOT_BRANCH"
+              git rm -rf .
+            )
+          fi
+
+          mkdir -p "$PUBLISH_DIR/snapshots"
+          cp -R "$SNAPSHOT_SOURCE" "$PUBLISH_DIR/snapshots/$SNAPSHOT_DATE"
+          (
+            cd "$PUBLISH_DIR"
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add "snapshots/$SNAPSHOT_DATE"
+            if git diff --cached --quiet; then
+              echo "Market snapshot is unchanged; skipping commit."
+              exit 0
+            fi
+            git commit -m "Add market snapshot for $SNAPSHOT_DATE"
+            git push origin "HEAD:$SNAPSHOT_BRANCH"
+          )
+
       - name: Display cache statistics
         if: always()
         run: |
@@ -290,6 +353,7 @@ jobs:
           name: reports-all-timeframes-${{ github.run_number }}
           path: |
             reports/
+            market_snapshots/
             paper_trades.json
           retention-days: 30
 
