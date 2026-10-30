@@ -1,0 +1,20 @@
+{
+  "snapshot_date": "2026-10-30",
+  "generated_at_utc": "2026-10-30T04:05:08.774284+00:00",
+  "source_commit": "4893904b154838f9e1d60b70045f76345db68874",
+  "workflow_run_id": "40995887743",
+  "workflow_run_url": "https://github.com/omarion2322/harmonic-scanner/actions/runs/40995887743",
+  "tp_strategy": "MITCH",
+  "timeframes": [
+    {
+      "timeframe": "1d",
+      "status": "included",
+      "source_report": "reports/2026-10-30/1d/harmonic_report_2026-10-30_1d.txt"
+    },
+    {
+      "timeframe": "1wk",
+      "status": "included",
+      "source_report": "reports/2026-10-30/1wk/harmonic_report_2026-10-30_1wk.txt"
+    }
+  ]
+}
